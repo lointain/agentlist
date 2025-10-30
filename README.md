@@ -1,93 +1,107 @@
-# agentlist
+# AgentList - 多语言 LangGraph 分布式执行平台
 
+基于 LangGraph 的高并发、多语言支持的分布式 Agent 执行平台，实现了管理服务与 Worker 的解耦架构。
 
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+## 架构概览
 
 ```
-cd existing_repo
-git remote add origin http://10.10.12.22/deepagents/agentlist.git
-git branch -M main
-git push -uf origin main
+┌─────────────────┐    HTTP/SSE     ┌──────────────────┐
+│   Orchestrator  │ ◄──────────────► │   Worker-JS      │
+│   (协调器)       │                 │   (JS/TS Worker) │
+│                 │                 └──────────────────┘
+│  - API 管理     │    HTTP/SSE     ┌──────────────────┐
+│  - 任务调度     │ ◄──────────────► │   Worker-Python  │
+│  - 状态管理     │                 │   (Python Worker)│
+│  - SSE 转发     │                 └──────────────────┘
+└─────────────────┘
+        │
+        ▼
+┌─────────────────┐    ┌──────────────────┐
+│   PostgreSQL    │    │   Redis Streams  │
+│   (持久化存储)   │    │   (事件流/队列)   │
+└─────────────────┘    └──────────────────┘
 ```
 
-## Integrate with your tools
+## 项目结构
 
-- [ ] [Set up project integrations](http://10.10.12.22/deepagents/agentlist/-/settings/integrations)
+- **orchestrator/**: 协调器服务，基于 langgraph-api 改造
+  - 提供统一的 REST API 和 SSE 接口
+  - 管理 Assistant、Thread、Run 的生命周期
+  - 调度任务到不同语言的 Worker
+  - 集成 PostgreSQL 持久化和 Redis Streams 事件流
 
-## Collaborate with your team
+- **worker-js/**: JavaScript/TypeScript Worker
+  - 实现 HTTP + SSE 协议
+  - 执行 LangGraph 图的实际运行
+  - 无状态设计，状态通过共享存储管理
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+- **worker-python/**: Python Worker
+  - 实现 HTTP + SSE 协议
+  - 支持 Python 版本的 LangGraph 执行
+  - 与 JS Worker 保持协议一致
 
-## Test and Deploy
+## 核心特性
 
-Use the built-in continuous integration in GitLab.
+### 高并发优化
+- PostgreSQL 事务型持久化，支持 `FOR UPDATE SKIP LOCKED` 调度
+- Redis Streams 事件流，支持断连重连和跨实例消费
+- 动态 Worker 池和负载均衡
+- 多租户限流和优先级队列
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+### 跨语言支持
+- 统一的 HTTP + SSE 协议
+- 语言无关的状态管理
+- 一致的错误处理和事件格式
 
-***
+### 可扩展性
+- Docker 容器化部署
+- 水平扩展 Worker 实例
+- 服务发现和健康检查
 
-# Editing this README
+## 快速开始
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+### 1. 启动基础设施
+```bash
+# 启动 PostgreSQL 和 Redis
+docker-compose up -d postgres redis
+```
 
-## Suggestions for a good README
+### 2. 启动协调器
+```bash
+cd orchestrator
+npm install
+npm run dev
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### 3. 启动 Workers
+```bash
+# JS Worker
+cd worker-js
+npm install
+npm start
 
-## Name
-Choose a self-explaining name for your project.
+# Python Worker
+cd worker-python
+pip install -r requirements.txt
+python main.py
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+### 4. 访问服务
+- API 文档: http://localhost:8080/docs
+- Studio UI: http://localhost:8080/ui
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+## 开发指南
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+详细的开发指南请参考各子项目的 README 文件：
+- [Orchestrator 开发指南](./orchestrator/README.md)
+- [Worker-JS 开发指南](./worker-js/README.md)
+- [Worker-Python 开发指南](./worker-python/README.md)
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## 部署
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+支持多种部署方式：
+- Docker Compose (开发/测试)
+- Kubernetes (生产环境)
+- 单机部署 (小规模场景)
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+详见 [部署文档](./docs/deployment.md)

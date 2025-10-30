@@ -1,0 +1,126 @@
+version: '3.9'
+
+services:
+  # PostgreSQL 数据库 - 用于持久化存储
+  postgres:
+    image: postgres:16
+    container_name: agentlist-postgres
+    environment:
+      POSTGRES_DB: agentlist
+      POSTGRES_USER: agentlist
+      POSTGRES_PASSWORD: agentlist123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - agentlist-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentlist -d agentlist"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis - 用于事件流和缓存
+  redis:
+    image: redis:7-alpine
+    container_name: agentlist-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agentlist-network
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 协调器服务
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: agentlist-orchestrator
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://agentlist:agentlist123@postgres:5432/agentlist
+      - REDIS_URL=redis://redis:6379
+      - WORKER_JS_URL=http://worker-js:3001
+      - WORKER_PYTHON_URL=http://worker-python:3002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentlist-network
+    volumes:
+      - ./orchestrator:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # JavaScript Worker
+  worker-js:
+    build:
+      context: ./worker-js
+      dockerfile: Dockerfile
+    container_name: agentlist-worker-js
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://agentlist:agentlist123@postgres:5432/agentlist
+      - REDIS_URL=redis://redis:6379
+      - WORKER_PORT=3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentlist-network
+    volumes:
+      - ./worker-js:/app
+      - /app/node_modules
+    command: npm start
+
+  # Python Worker
+  worker-python:
+    build:
+      context: ./worker-python
+      dockerfile: Dockerfile
+    container_name: agentlist-worker-python
+    ports:
+      - "3002:3002"
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql://agentlist:agentlist123@postgres:5432/agentlist
+      - REDIS_URL=redis://redis:6379
+      - WORKER_PORT=3002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agentlist-network
+    volumes:
+      - ./worker-python:/app
+    command: python main.py
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  agentlist-network:
+    driver: bridge

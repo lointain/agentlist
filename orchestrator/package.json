@@ -1,0 +1,84 @@
+{
+  "name": "agentlist-orchestrator",
+  "version": "1.0.0",
+  "description": "AgentList Orchestrator - 多语言 LangGraph 分布式执行平台的协调器服务",
+  "type": "module",
+  "engines": {
+    "node": "^18.19.0 || >=20.16.0"
+  },
+  "license": "MIT",
+  "main": "./dist/server.mjs",
+  "files": [
+    "dist/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/agentlist.git"
+  },
+  "scripts": {
+    "clean": "rm -rf dist/ .turbo/",
+    "build": "node scripts/build.mjs",
+    "dev": "tsx src/server.mts --dev",
+    "start": "node dist/server.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@babel/code-frame": "^7.26.2",
+    "@hono/node-server": "^1.12.0",
+    "@hono/zod-validator": "^0.2.2",
+    "@langchain/langgraph-ui": "workspace:*",
+    "@types/json-schema": "^7.0.15",
+    "@typescript/vfs": "^1.6.0",
+    "dedent": "^1.5.3",
+    "dotenv": "^16.4.7",
+    "exit-hook": "^4.0.0",
+    "hono": "^4.5.4",
+    "langsmith": "^0.3.33",
+    "open": "^10.1.0",
+    "semver": "^7.7.1",
+    "stacktrace-parser": "^0.1.10",
+    "superjson": "^2.2.2",
+    "tsx": "^4.19.3",
+    "uuid": "^10.0.0",
+    "winston": "^3.17.0",
+    "winston-console-format": "^1.0.8",
+    "zod": "^3.25.76 || ^4",
+    "pg": "^8.12.0",
+    "redis": "^4.7.0",
+    "ioredis": "^5.4.1"
+  },
+  "peerDependencies": {
+    "@langchain/core": "^0.3.59 || ^1.0.1",
+    "@langchain/langgraph": "^0.2.57 || ^0.3.0 || ^0.4.0 || ^1.0.0-alpha || ^1.0.0",
+    "@langchain/langgraph-checkpoint": "~0.0.16 || ^0.1.0 || ~1.0.0",
+    "@langchain/langgraph-sdk": "~0.0.16 || ^0.1.0 || ~1.0.0",
+    "typescript": "^5.5.4"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/langgraph-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@langchain/core": "^1.0.0",
+    "@langchain/langgraph": "workspace:*",
+    "@langchain/langgraph-checkpoint": "workspace:*",
+    "@langchain/langgraph-sdk": "workspace:*",
+    "@types/babel__code-frame": "^7.0.6",
+    "@types/node": "^18.15.11",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@types/semver": "^7.7.0",
+    "@types/uuid": "^10.0.0",
+    "@types/pg": "^8.11.10",
+    "jose": "^6.0.10",
+    "postgres": "^3.4.5",
+    "prettier": "^2.8.3",
+    "typescript": "^4.9.5 || ^5.4.5",
+    "vitest": "^3.1.2",
+    "wait-port": "^1.1.0"
+  }
+}
