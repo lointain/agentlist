@@ -79,6 +79,8 @@ services:
       - DATABASE_URL=postgresql://agentlist:agentlist123@postgres:5432/agentlist
       - REDIS_URL=redis://redis:6379
       - WORKER_PORT=3001
+      - ORCHESTRATOR_URL=http://orchestrator:8080
+      - LANGGRAPH_CONFIG_PATH=/app/examples/langgraph-dev/langgraph.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +91,7 @@ services:
     volumes:
       - ./worker-js:/app
       - /app/node_modules
-    command: npm start
+    command: npm run dev
 
   # Python Worker
   worker-python:

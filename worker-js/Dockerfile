@@ -1,5 +1,5 @@
 # AgentList JavaScript Worker Dockerfile
-FROM node:20-alpine
+FROM node:18-alpine
 
 # 设置工作目录
 WORKDIR /app
@@ -15,7 +15,7 @@ RUN apk add --no-cache \
 COPY package*.json ./
 
 # 安装 Node.js 依赖
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci && npm cache clean --force
 
 # 复制源代码
 COPY . .

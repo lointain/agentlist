@@ -1,0 +1,12 @@
+{
+  "graphs": {
+    "examples-echo": "./index.ts:graph"
+  },
+  "env": {},
+  "dependencies": {
+    "npm": {
+      "@langchain/core": ">=1.0.0",
+      "@langchain/langgraph": ">=1.0.0"
+    }
+  }
+}

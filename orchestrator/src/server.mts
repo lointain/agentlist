@@ -7,6 +7,8 @@ import { Hono } from "hono";
 import { contextStorage } from "hono/context-storage";
 import { z } from "zod";
 import dotenv from "dotenv";
+import path from "node:path";
+import fs from "node:fs";
 import crypto from "node:crypto";
 
 // 存储与队列适配器
@@ -38,7 +40,35 @@ import store from "./api/store.mts";
 import meta from "./api/meta.mts";
 
 // 配置与环境变量解析
-dotenv.config();
+// 在开发模式下优先加载仓库根目录的 .env.dev，兼容不同工作目录
+(() => {
+  try {
+    const cwd = process.cwd();
+    const candidates = [
+      path.join(cwd, ".env.dev"),
+      path.join(cwd, "..", ".env.dev"),
+      path.join(cwd, "..", "..", ".env.dev"),
+    ];
+    // 如用户通过 DOTENV_CONFIG_PATH 指定路径，则优先使用
+    const explicit = process.env.DOTENV_CONFIG_PATH;
+    if (explicit && fs.existsSync(explicit)) {
+      dotenv.config({ path: explicit });
+      return;
+    }
+    // 自动探测 .env.dev
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        dotenv.config({ path: p });
+        return;
+      }
+    }
+    // 回退到默认 .env
+    dotenv.config();
+  } catch {
+    // 静默回退
+    dotenv.config();
+  }
+})();
 
 // 服务器配置接口
 export interface ServerConfig {

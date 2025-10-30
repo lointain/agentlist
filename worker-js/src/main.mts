@@ -7,6 +7,8 @@ import { contextStorage } from "hono/context-storage";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import dotenv from "dotenv";
+import fs from "node:fs";
+import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
 import winston from "winston";
 import { Pool } from "pg";
@@ -20,6 +22,7 @@ import { registerWithOrchestrator as rtRegisterWithOrchestrator, startHeartbeat 
 // 导入 LangGraph 相关
 // 引入 Worker 侧图加载逻辑：支持路径+导出符语法与缓存
 import { getGraph as getWorkerGraph, registerFromEnv as registerGraphsFromEnv } from "./graph/load.mts";
+import { parseLanggraphJson, tryParseDefaultLanggraphJson } from "./graph/langgraph.config.mts";
 
 // 加载环境变量
 dotenv.config();
@@ -357,6 +360,25 @@ export class AgentListWorker {
     // 注册到协调器
     await rtRegisterWithOrchestrator(this.config, { pool: this.pool, logger });
     
+    // 优先尝试基于标准 langgraph.json 注册图（符合 langgraphjs 项目结构）
+    try {
+      const configPath = process.env.LANGGRAPH_CONFIG_PATH || path.join(process.cwd(), "langgraph.json");
+      let cfg: { specs: Record<string, string>; baseDir: string } | null = null;
+      if (fs.existsSync(configPath)) {
+        cfg = parseLanggraphJson(configPath);
+      } else {
+        cfg = tryParseDefaultLanggraphJson();
+      }
+      if (cfg && Object.keys(cfg.specs).length > 0) {
+        await registerGraphsFromEnv(cfg.specs, { cwd: cfg.baseDir });
+        logger.info(`Registered graphs from langgraph.json: ${Object.keys(cfg.specs).join(', ')}`);
+      } else {
+        logger.info('No langgraph.json found or no JS graphs defined; skipping');
+      }
+    } catch (err) {
+      logger.warn('Failed to register graphs from langgraph.json:', err);
+    }
+
     // 在 Worker 启动时支持从环境变量预注册图
     // 约定：WORKER_GRAPHS 为 JSON，形如 { "graphA": "./graphs/graphA.mjs", "graphB": "./graphs/graphB.mjs:build" }
     try {
