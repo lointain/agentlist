@@ -1,235 +1,505 @@
+// AgentList Orchestrator 服务�?// 集成 PostgreSQL、Redis Streams �?Worker 管理的高并发版本
+
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { contextStorage } from "hono/context-storage";
+import { z } from "zod";
+import dotenv from "dotenv";
 
-import { registerFromEnv } from "./graph/load.mjs";
+// 导入存储适配�?import { PostgresAdapter } from "./storage/postgres.mts";
+import { RedisStreamManager, RedisLockManager, RedisCancellationManager } from "./storage/redis-streams.mts";
 
-import runs from "./api/runs.mjs";
-import threads from "./api/threads.mjs";
-import assistants from "./api/assistants.mjs";
-import store from "./api/store.mjs";
-import meta from "./api/meta.mjs";
+// 导入 Worker 管理
+import { WorkerRegistry } from "./worker/registry.mts";
 
-import type { Ops, Store, StorageEnv } from "./storage/types.mjs";
-import { zValidator } from "@hono/zod-validator";
-import { z } from "zod/v3";
-import { queue } from "./queue.mjs";
-import {
-  logger,
-  requestLogger,
-  registerRuntimeLogFormatter,
-  registerSdkLogger,
-} from "./logging.mjs";
-import { checkpointer } from "./storage/checkpoint.mjs";
-import { FileSystemOps } from "./storage/ops.mjs";
-import { store as graphStore } from "./storage/store.mjs";
-import { auth } from "./auth/custom.mjs";
-import { registerAuth } from "./auth/index.mjs";
-import { registerHttp } from "./http/custom.mjs";
-import { cors, ensureContentType } from "./http/middleware.mjs";
-import { bindLoopbackFetch } from "./loopback.mjs";
-import { checkLangGraphSemver } from "./semver/index.mjs";
-import { getConfig } from "@langchain/langgraph";
-import { FileSystemPersistence } from "./storage/persist.mjs";
+// 导入中间�?import { createMultiLevelRateLimit } from "./middleware/rate-limit.mts";
 
-export const StartServerSchema = z.object({
-  port: z.number(),
-  nWorkers: z.number(),
-  host: z.string(),
-  cwd: z.string(),
-  graphs: z.record(
-    z.union([
-      z.string(),
-      z.object({ path: z.string(), description: z.string().optional() }),
-    ])
-  ),
-  auth: z
-    .object({
-      path: z.string().optional(),
-      disable_studio_auth: z.boolean().default(false),
-    })
-    .optional(),
-  ui: z.record(z.string()).optional(),
-  ui_config: z.object({ shared: z.array(z.string()).optional() }).optional(),
-  http: z
-    .object({
-      app: z.string().optional(),
-      disable_assistants: z.boolean().default(false),
-      disable_threads: z.boolean().default(false),
-      disable_runs: z.boolean().default(false),
-      disable_store: z.boolean().default(false),
-      disable_meta: z.boolean().default(false),
-      cors: z
-        .object({
-          allow_origins: z.array(z.string()).optional(),
-          allow_methods: z.array(z.string()).optional(),
-          allow_headers: z.array(z.string()).optional(),
-          allow_credentials: z.boolean().optional(),
-          allow_origin_regex: z.string().optional(),
-          expose_headers: z.array(z.string()).optional(),
-          max_age: z.number().optional(),
-        })
-        .optional(),
-    })
-    .optional(),
-});
+// 导入原有 API 路由（需要适配�?import runs from "./api/runs.mts";
+import threads from "./api/threads.mts";
+import assistants from "./api/assistants.mts";
+import store from "./api/store.mts";
+import meta from "./api/meta.mts";
 
-export async function startServer(
-  options: z.infer<typeof StartServerSchema>,
-  storage?: { ops?: Ops }
-) {
-  const semver = await checkLangGraphSemver();
-  const invalidPackages = semver.filter((s) => !s.satisfies);
-  if (invalidPackages.length > 0) {
-    logger.warn(
-      `Some LangGraph.js dependencies are not up to date. Please make sure to update them to the required version.`,
-      Object.fromEntries(
-        invalidPackages.map(({ name, version, required }) => [
-          name,
-          { version, required },
-        ])
-      )
-    );
+// 导入工具
+import { logger, requestLogger } from "./logging.mts";
+import { cors, ensureContentType } from "./http/middleware.mts";
+
+// 加载环境变量
+dotenv.config();
+
+export interface ServerConfig {
+  port: number;
+  host: string;
+  
+  // 数据库配�?  databaseUrl: string;
+  redisUrl: string;
+  
+  // Worker 配置
+  workers: {
+    js?: string;
+    python?: string;
+  };
+  
+  // 功能开�?  enableRateLimit: boolean;
+  enableAuth: boolean;
+  
+  // 性能配置
+  maxConnections: number;
+  healthCheckInterval: number;
+}
+
+export class AgentListServer {
+  private app: Hono;
+  private postgresAdapter: PostgresAdapter;
+  private redisStreamManager: RedisStreamManager;
+  private redisLockManager: RedisLockManager;
+  private redisCancellationManager: RedisCancellationManager;
+  private workerRegistry: WorkerRegistry;
+  private config: ServerConfig;
+
+  constructor(config: ServerConfig) {
+    this.config = config;
+    this.app = new Hono();
+    
+    // 初始化存储适配�?    this.postgresAdapter = new PostgresAdapter({
+      connectionString: config.databaseUrl,
+      maxConnections: config.maxConnections,
+    });
+
+    // 初始�?Redis 组件
+    const redisConfig = { url: config.redisUrl };
+    this.redisStreamManager = new RedisStreamManager(redisConfig);
+    this.redisLockManager = new RedisLockManager(redisConfig);
+    this.redisCancellationManager = new RedisCancellationManager(redisConfig);
+
+    // 初始�?Worker 注册�?    this.workerRegistry = new WorkerRegistry(config.healthCheckInterval);
+
+    this.setupMiddleware();
+    this.setupRoutes();
   }
 
-  logger.info(`Initializing storage...`);
-  let initCalls: Promise<FileSystemPersistence<unknown>>[] = [
-    checkpointer.initialize(options.cwd),
-    graphStore.initialize(options.cwd),
-  ];
+  private setupMiddleware(): void {
+    // 基础中间�?    this.app.use("*", contextStorage());
+    this.app.use("*", requestLogger());
+    this.app.use("*", cors());
+    this.app.use("*", ensureContentType());
 
-  let ops = storage?.ops;
-  if (ops == null) {
-    const opsConn = new FileSystemPersistence<Store>(
-      ".langgraphjs_ops.json",
-      () => ({
-        runs: {},
-        threads: {},
-        assistants: {},
-        assistant_versions: [],
-        retry_counter: {},
-      })
-    );
-    initCalls.push(opsConn.initialize(options.cwd));
-    ops = new FileSystemOps(opsConn);
+    // 限流中间�?    if (this.config.enableRateLimit) {
+      const rateLimitMiddleware = createMultiLevelRateLimit(
+        // 传入 Redis 实例用于跨实例共�?        this.redisStreamManager['redis'] // 复用 Redis 连接
+      );
+      
+      rateLimitMiddleware.forEach(middleware => {
+        this.app.use("*", middleware);
+      });
+    }
+
+    // 注入依赖到上下文
+    this.app.use("*", async (c, next) => {
+      // 注入存储适配�?      c.set('postgres', this.postgresAdapter);
+      c.set('redisStreams', this.redisStreamManager);
+      c.set('redisLocks', this.redisLockManager);
+      c.set('redisCancellation', this.redisCancellationManager);
+      c.set('workerRegistry', this.workerRegistry);
+      
+      await next();
+    });
   }
-  const callbacks = await Promise.all(initCalls);
 
-  const cleanup = async () => {
-    logger.info(`Flushing to persistent storage, exiting...`);
-    await Promise.all(callbacks.map((c) => c.flush()));
+  private setupRoutes(): void {
+    // 健康检�?    this.app.get('/health', async (c) => {
+      try {
+        // 检查数据库连接
+        await this.postgresAdapter.runs.search({ limit: 1 });
+        
+        // 检�?Redis 连接
+        await this.redisStreamManager['redis'].ping();
+        
+        // 获取 Worker 状�?        const workers = this.workerRegistry.getWorkers();
+        const healthyWorkers = this.workerRegistry.getHealthyWorkers();
+        
+        return c.json({
+          status: 'healthy',
+          timestamp: new Date().toISOString(),
+          database: 'connected',
+          redis: 'connected',
+          workers: {
+            total: workers.length,
+            healthy: healthyWorkers.length,
+            unhealthy: workers.length - healthyWorkers.length,
+          },
+        });
+      } catch (error) {
+        logger.error('Health check failed:', error);
+        return c.json({
+          status: 'unhealthy',
+          error: error instanceof Error ? error.message : 'Unknown error',
+        }, 503);
+      }
+    });
+
+    // Worker 管理 API
+    this.setupWorkerRoutes();
+
+    // 指标 API
+    this.setupMetricsRoutes();
+
+    // 原有 API 路由（需要适配新的存储层）
+    this.app.route('/assistants', assistants);
+    this.app.route('/threads', threads);
+    this.app.route('/runs', runs);
+    this.app.route('/store', store);
+    this.app.route('/', meta);
+
+    // 自定义运�?API - 集成 Worker 调度
+    this.setupCustomRunsAPI();
+  }
+
+  private setupWorkerRoutes(): void {
+    // 获取 Worker 列表
+    this.app.get('/workers', async (c) => {
+      const workers = this.workerRegistry.getWorkers();
+      return c.json(workers);
+    });
+
+    // 注册 Worker
+    this.app.post('/workers/register', async (c) => {
+      const body = await c.req.json();
+      await this.workerRegistry.registerWorker(body);
+      return c.json({ success: true });
+    });
+
+    // 注销 Worker
+    this.app.delete('/workers/:workerId', async (c) => {
+      const workerId = c.req.param('workerId');
+      await this.workerRegistry.unregisterWorker(workerId);
+      return c.json({ success: true });
+    });
+
+    // Worker 心跳
+    this.app.post('/workers/:workerId/heartbeat', async (c) => {
+      const workerId = c.req.param('workerId');
+      this.workerRegistry.updateHeartbeat(workerId);
+      return c.json({ success: true });
+    });
+  }
+
+  private setupMetricsRoutes(): void {
+    // 队列深度
+    this.app.get('/metrics/queue-depth', async (c) => {
+      const pendingRuns = await this.postgresAdapter.runs.search({
+        status: ['pending'],
+        limit: 1000,
+      });
+      
+      return c.json({
+        queueDepth: pendingRuns.length,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    // Worker 状�?    this.app.get('/metrics/workers', async (c) => {
+      const workers = this.workerRegistry.getWorkers();
+      const metrics = workers.map(w => ({
+        workerId: w.workerId,
+        workerType: w.workerType,
+        status: w.status,
+        activeTasks: w.metrics.activeTasks,
+        totalTasks: w.metrics.totalTasks,
+        avgResponseTime: w.metrics.avgResponseTime,
+        errorRate: w.metrics.errorRate,
+      }));
+      
+      return c.json(metrics);
+    });
+  }
+
+  private setupCustomRunsAPI(): void {
+    // 创建运行 - 集成 Worker 调度
+    this.app.post('/threads/:threadId/runs', async (c) => {
+      try {
+        const threadId = c.req.param('threadId');
+        const body = await c.req.json();
+        
+        const { assistant_id, input, config, metadata } = body;
+        
+        // 获取助手信息
+        const assistant = await this.postgresAdapter.assistants.get(assistant_id);
+        if (!assistant) {
+          return c.json({ error: 'Assistant not found' }, 404);
+        }
+
+        // 选择合适的 Worker
+        const worker = this.workerRegistry.selectWorker(assistant.graph_id);
+        if (!worker) {
+          return c.json({ 
+            error: `No available worker for graph: ${assistant.graph_id}` 
+          }, 503);
+        }
+
+        // 生成运行 ID
+        const runId = crypto.randomUUID();
+        
+        // 创建运行记录
+        await this.postgresAdapter.runs.put(
+          runId,
+          assistant_id,
+          { input, config },
+          { 
+            threadId, 
+            status: 'pending',
+            metadata: { 
+              ...metadata, 
+              workerId: worker.workerId,
+              workerType: worker.workerType 
+            }
+          }
+        );
+
+        // 调度�?Worker
+        const workerClient = this.workerRegistry.getWorkerClient(worker.workerId);
+        if (workerClient) {
+          try {
+            await workerClient.startRun({
+              runId,
+              threadId,
+              graphId: assistant.graph_id,
+              checkpointUri: this.config.databaseUrl,
+              config: { ...assistant.config, ...config },
+              inputs: input,
+              metadata: metadata || {},
+            });
+
+            // 更新运行状�?            await this.postgresAdapter.runs.updateStatus(runId, 'running');
+            
+            // 更新 Worker 指标
+            this.workerRegistry.updateWorkerMetrics(worker.workerId, {
+              activeTasks: worker.metrics.activeTasks + 1,
+              totalTasks: worker.metrics.totalTasks + 1,
+            });
+
+          } catch (error) {
+            logger.error(`Failed to start run on worker ${worker.workerId}:`, error);
+            await this.postgresAdapter.runs.updateStatus(runId, 'failed', {
+              error: error instanceof Error ? error.message : 'Worker error'
+            });
+          }
+        }
+
+        return c.json({ run_id: runId }, 201);
+        
+      } catch (error) {
+        logger.error('Failed to create run:', error);
+        return c.json({ 
+          error: error instanceof Error ? error.message : 'Internal error' 
+        }, 500);
+      }
+    });
+
+    // 获取运行�?- �?Worker 转发 SSE
+    this.app.get('/threads/:threadId/runs/:runId/stream', async (c) => {
+      const runId = c.req.param('runId');
+      
+      try {
+        // 获取运行信息
+        const run = await this.postgresAdapter.runs.get(runId);
+        if (!run) {
+          return c.json({ error: 'Run not found' }, 404);
+        }
+
+        const workerId = run.metadata?.workerId;
+        if (!workerId) {
+          return c.json({ error: 'No worker assigned to this run' }, 400);
+        }
+
+        const workerClient = this.workerRegistry.getWorkerClient(workerId);
+        if (!workerClient) {
+          return c.json({ error: 'Worker not available' }, 503);
+        }
+
+        // 设置 SSE 响应�?        c.header('Content-Type', 'text/event-stream');
+        c.header('Cache-Control', 'no-cache');
+        c.header('Connection', 'keep-alive');
+
+        // 创建流响�?        return new Response(
+          new ReadableStream({
+            async start(controller) {
+              try {
+                // �?Worker 获取事件流并转发
+                for await (const event of workerClient.getRunStream(runId)) {
+                  const sseData = `data: ${JSON.stringify(event)}\n\n`;
+                  controller.enqueue(new TextEncoder().encode(sseData));
+                  
+                  // 同时写入 Redis Streams 用于持久�?                  await this.redisStreamManager.publish(runId, event.event, event.data);
+                  
+                  // 如果是结束事件，更新运行状�?                  if (event.event === 'done' || event.event === 'error') {
+                    const status = event.event === 'done' ? 'completed' : 'failed';
+                    await this.postgresAdapter.runs.updateStatus(runId, status, event.data);
+                    
+                    // 更新 Worker 指标
+                    const worker = this.workerRegistry.getWorkers()
+                      .find(w => w.workerId === workerId);
+                    if (worker) {
+                      this.workerRegistry.updateWorkerMetrics(workerId, {
+                        activeTasks: Math.max(0, worker.metrics.activeTasks - 1),
+                      });
+                    }
+                    break;
+                  }
+                }
+              } catch (error) {
+                logger.error(`Stream error for run ${runId}:`, error);
+                const errorData = `data: ${JSON.stringify({
+                  event: 'error',
+                  data: { message: 'Stream error' }
+                })}\n\n`;
+                controller.enqueue(new TextEncoder().encode(errorData));
+              } finally {
+                controller.close();
+              }
+            }
+          }),
+          {
+            headers: {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            }
+          }
+        );
+
+      } catch (error) {
+        logger.error(`Failed to get stream for run ${runId}:`, error);
+        return c.json({ 
+          error: error instanceof Error ? error.message : 'Internal error' 
+        }, 500);
+      }
+    });
+
+    // 取消运行
+    this.app.post('/threads/:threadId/runs/:runId/cancel', async (c) => {
+      const runId = c.req.param('runId');
+      const body = await c.req.json();
+      const action = body.action || 'interrupt';
+      
+      try {
+        const run = await this.postgresAdapter.runs.get(runId);
+        if (!run) {
+          return c.json({ error: 'Run not found' }, 404);
+        }
+
+        const workerId = run.metadata?.workerId;
+        if (workerId) {
+          const workerClient = this.workerRegistry.getWorkerClient(workerId);
+          if (workerClient) {
+            await workerClient.cancelRun(runId, action);
+          }
+        }
+
+        // 发送取消信�?        await this.redisCancellationManager.sendCancelSignal(runId, action);
+        
+        // 更新运行状�?        await this.postgresAdapter.runs.updateStatus(runId, 'cancelled', { action });
+
+        return c.json({ success: true });
+        
+      } catch (error) {
+        logger.error(`Failed to cancel run ${runId}:`, error);
+        return c.json({ 
+          error: error instanceof Error ? error.message : 'Internal error' 
+        }, 500);
+      }
+    });
+  }
+
+  async start(): Promise<void> {
+    // 注册预配置的 Worker
+    await this.registerConfiguredWorkers();
+    
+    // 启动 Worker 健康检�?    this.workerRegistry.startHealthCheck();
+    
+    // 启动服务�?    const server = serve({
+      fetch: this.app.fetch,
+      port: this.config.port,
+      hostname: this.config.host,
+    });
+
+    logger.info(`AgentList Orchestrator started on ${this.config.host}:${this.config.port}`);
+    logger.info(`Database: ${this.config.databaseUrl.replace(/\/\/.*@/, '//***@')}`);
+    logger.info(`Redis: ${this.config.redisUrl.replace(/\/\/.*@/, '//***@')}`);
+    
+    return server;
+  }
+
+  async stop(): Promise<void> {
+    // 停止健康检�?    this.workerRegistry.stopHealthCheck();
+    
+    // 关闭连接
+    await this.postgresAdapter.close();
+    await this.redisStreamManager.close();
+    await this.redisLockManager.close();
+    await this.redisCancellationManager.close();
+    
+    logger.info('AgentList Orchestrator stopped');
+  }
+
+  private async registerConfiguredWorkers(): Promise<void> {
+    const { workers } = this.config;
+    
+    if (workers.js) {
+      await this.workerRegistry.registerWorker({
+        workerId: 'worker-js-1',
+        workerType: 'js',
+        endpointUrl: workers.js,
+        status: 'active',
+        capabilities: {
+          graphs: ['*'], // 支持所有图
+        },
+        lastHeartbeat: new Date(),
+      });
+    }
+
+    if (workers.python) {
+      await this.workerRegistry.registerWorker({
+        workerId: 'worker-python-1',
+        workerType: 'python',
+        endpointUrl: workers.python,
+        status: 'active',
+        capabilities: {
+          graphs: ['*'], // 支持所有图
+        },
+        lastHeartbeat: new Date(),
+      });
+    }
+  }
+}
+
+// 启动服务器的便捷函数
+export async function startServer(config?: Partial<ServerConfig>): Promise<AgentListServer> {
+  const defaultConfig: ServerConfig = {
+    port: parseInt(process.env.PORT || '8080'),
+    host: process.env.HOST || '0.0.0.0',
+    databaseUrl: process.env.DATABASE_URL || 'postgresql://agentlist:agentlist123@localhost:5432/agentlist',
+    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+    workers: {
+      js: process.env.WORKER_JS_URL,
+      python: process.env.WORKER_PYTHON_URL,
+    },
+    enableRateLimit: process.env.ENABLE_RATE_LIMIT !== 'false',
+    enableAuth: process.env.ENABLE_AUTH === 'true',
+    maxConnections: parseInt(process.env.MAX_CONNECTIONS || '20'),
+    healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000'),
   };
 
-  // Register global logger that can be consumed via SDK
-  // We need to do this before we load the graphs in-case the logger is obtained at top-level.
-  registerSdkLogger();
+  const finalConfig = { ...defaultConfig, ...config };
+  const server = new AgentListServer(finalConfig);
+  
+  await server.start();
+  return server;
+}
 
-  logger.info(`Registering graphs from ${options.cwd}`);
-  let hasGraphDescriptions = false;
-  const graphPaths = Object.fromEntries(
-    Object.entries(options.graphs).map(([graphId, rawSpec]) => {
-      if (typeof rawSpec === "string") {
-        return [graphId, rawSpec];
-      }
-      if (rawSpec.description) {
-        hasGraphDescriptions = true;
-      }
-      return [graphId, rawSpec.path];
-    })
-  );
-  if (hasGraphDescriptions) {
-    logger.warn(
-      "A graph definition in `langgraph.json` has a `description` property. Local MCP features are not yet supported with the JS CLI and will be ignored."
-    );
-  }
-  await registerFromEnv(ops.assistants, graphPaths, { cwd: options.cwd });
-
-  registerRuntimeLogFormatter((info) => {
-    const config = getConfig();
-    if (config == null) return info;
-
-    const node = config.metadata?.["langgraph_node"];
-    if (node != null) info.langgraph_node = node;
-
-    return info;
+// 如果直接运行此文件，启动服务�?if (import.meta.url === `file://${process.argv[1]}`) {
+  startServer().catch(error => {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
   });
-
-  const app = new Hono<StorageEnv>();
-
-  app.use(contextStorage());
-  app.use(async (c, next) => {
-    c.set("LANGGRAPH_OPS", ops);
-    await next();
-  });
-
-  // Loopback fetch used by webhooks and custom routes
-  bindLoopbackFetch(app);
-
-  app.post(
-    "/internal/truncate",
-    zValidator(
-      "json",
-      z.object({
-        runs: z.boolean().optional(),
-        threads: z.boolean().optional(),
-        assistants: z.boolean().optional(),
-        checkpointer: z.boolean().optional(),
-        store: z.boolean().optional(),
-      })
-    ),
-    (c) => {
-      const { runs, threads, assistants, checkpointer, store } =
-        c.req.valid("json");
-
-      ops.truncate({ runs, threads, assistants, checkpointer, store });
-      return c.json({ ok: true });
-    }
-  );
-
-  app.use(cors(options.http?.cors));
-  app.use(requestLogger());
-
-  if (options.auth?.path) {
-    logger.info(`Loading auth from ${options.auth.path}`);
-    await registerAuth(options.auth, { cwd: options.cwd });
-    app.use(auth());
-  }
-
-  if (options.http?.app) {
-    logger.info(`Loading HTTP app from ${options.http.app}`);
-    const { api } = await registerHttp(options.http.app, { cwd: options.cwd });
-    app.route("/", api);
-  }
-
-  app.use(ensureContentType());
-
-  if (!options.http?.disable_meta) app.route("/", meta);
-  if (!options.http?.disable_assistants) app.route("/", assistants);
-  if (!options.http?.disable_runs) app.route("/", runs);
-  if (!options.http?.disable_threads) app.route("/", threads);
-  if (!options.http?.disable_store) app.route("/", store);
-
-  if (options.ui) {
-    logger.info(`Registering UI from ${options.cwd}`);
-    const { api, registerGraphUi } = await import("./ui/load.mjs");
-    await registerGraphUi(options.ui, {
-      cwd: options.cwd,
-      config: options.ui_config,
-    });
-    app.route("/", api);
-  }
-
-  logger.info(`Starting ${options.nWorkers} workers`);
-  for (let i = 0; i < options.nWorkers; i++) queue(ops);
-
-  return new Promise<{ host: string; cleanup: () => Promise<void> }>(
-    (resolve) => {
-      serve(
-        { fetch: app.fetch, port: options.port, hostname: options.host },
-        (c) => {
-          resolve({ host: `${c.address}:${c.port}`, cleanup });
-        }
-      );
-    }
-  );
 }
