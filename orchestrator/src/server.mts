@@ -24,6 +24,11 @@ import { cors } from "./middleware/cors.mts";
 import { ensureContentType } from "./middleware/content-type.mts";
 import { ensureAuth } from "./middleware/auth.mts";
 import auth from "./api/auth.mts";
+// 系统 API 路由模块（抽离）
+import { registerHealthRoutes } from "./api/system/health.mts";
+import { registerMetricsRoutes } from "./api/system/metrics.mts";
+import { registerWorkerRoutes } from "./api/system/workers.mts";
+import { registerCustomRunsRoutes } from "./api/system/runs.custom.mts";
 
 // 原有路由（保持兼容）
 import runs from "./api/runs.mts";
@@ -129,42 +134,14 @@ export class AgentListServer {
 
   // 注册所有路由
   private setupRoutes(): void {
-    // 健康检查
-    this.app.get("/health", async (c) => {
-      try {
-        await this.postgresAdapter.runs.search({ limit: 1 });
-        // @ts-expect-error 兼容内部实现：从管理器暴露 redis 实例
-        await this.redisStreamManager["redis"].ping();
-        const workers = this.workerRegistry.getWorkers();
-        const healthyWorkers = this.workerRegistry.getHealthyWorkers();
-        return c.json({
-          status: "healthy",
-          timestamp: new Date().toISOString(),
-          database: "connected",
-          redis: "connected",
-          workers: {
-            total: workers.length,
-            healthy: healthyWorkers.length,
-            unhealthy: workers.length - healthyWorkers.length,
-          },
-        });
-      } catch (error) {
-        logger.error("Health check failed:", error);
-        return c.json(
-          {
-            status: "unhealthy",
-            error: error instanceof Error ? error.message : "Unknown error",
-          },
-          503
-        );
-      }
-    });
+    // 健康检查路由
+    registerHealthRoutes(this.app);
 
     // Worker 管理 API
-    this.setupWorkerRoutes();
+    registerWorkerRoutes(this.app);
 
     // 指标 API
-    this.setupMetricsRoutes();
+    registerMetricsRoutes(this.app);
 
     // 认证路由
     this.app.route("/auth", auth);
@@ -177,212 +154,14 @@ export class AgentListServer {
     this.app.route("/", meta);
 
     // 自定义运行 API - 调度 Worker 并转发 SSE
-    this.setupCustomRunsAPI();
+    registerCustomRunsRoutes(this.app, this.config.databaseUrl);
   }
 
-  // Worker 管理路由（注册、列表、健康）
-  private setupWorkerRoutes(): void {
-    // 注册 Worker
-    this.app.post("/workers/register", async (c) => {
-      try {
-        const body = await c.req.json();
-        // 必要字段：workerId/workerType/url
-        const workerId: string = body.workerId || crypto.randomUUID();
-        const workerType: string = body.workerType || "js";
-        const url: string = body.url;
-        if (!url) {
-          return c.json({ error: "Missing worker url" }, 400);
-        }
+  // Worker 路由已抽到 api/system/workers.mts
 
-        this.workerRegistry.registerWorker({ workerId, workerType, url });
-        return c.json({ workerId, workerType, url }, 201);
-      } catch (error) {
-        logger.error("Failed to register worker:", error);
-        return c.json({ error: "Internal error" }, 500);
-      }
-    });
+  // 指标路由已抽到 api/system/metrics.mts
 
-    // Worker 列表
-    this.app.get("/workers", (c) => {
-      const workers = this.workerRegistry.getWorkers();
-      return c.json(workers);
-    });
-
-    // Worker 健康
-    this.app.get("/workers/:workerId/health", (c) => {
-      const workerId = c.req.param("workerId");
-      const worker = this.workerRegistry.getWorkers().find((w) => w.workerId === workerId);
-      if (!worker) return c.json({ error: "Worker not found" }, 404);
-      return c.json({ workerId, status: worker.status });
-    });
-  }
-
-  // 指标路由
-  private setupMetricsRoutes(): void {
-    // 队列深度（pending runs 数量）
-    this.app.get("/metrics/queue-depth", async (c) => {
-      const pendingRuns = await this.postgresAdapter.runs.search({ status: ["pending"], limit: 1000 });
-      return c.json({ queueDepth: pendingRuns.length, timestamp: new Date().toISOString() });
-    });
-
-    // Worker 状态聚合指标
-    this.app.get("/metrics/workers", (c) => {
-      const workers = this.workerRegistry.getWorkers();
-      const metrics = workers.map((w) => ({
-        workerId: w.workerId,
-        workerType: w.workerType,
-        status: w.status,
-        activeTasks: w.metrics?.activeTasks ?? 0,
-        totalTasks: w.metrics?.totalTasks ?? 0,
-        avgResponseTime: w.metrics?.avgResponseTime ?? 0,
-        errorRate: w.metrics?.errorRate ?? 0,
-      }));
-      return c.json(metrics);
-    });
-  }
-
-  // 创建/取消/流式获取运行，调度到 Worker
-  private setupCustomRunsAPI(): void {
-    // 创建运行
-    this.app.post("/threads/:threadId/runs", async (c) => {
-      try {
-        const threadId = c.req.param("threadId");
-        const body = await c.req.json();
-        const { assistant_id, input, config, metadata } = body;
-
-        const assistant = await this.postgresAdapter.assistants.get(assistant_id);
-        if (!assistant) return c.json({ error: "Assistant not found" }, 404);
-
-        const worker = this.workerRegistry.selectWorker(assistant.graph_id);
-        if (!worker) return c.json({ error: `No worker for graph ${assistant.graph_id}` }, 503);
-
-        const runId = crypto.randomUUID();
-        await this.postgresAdapter.runs.put(
-          runId,
-          assistant_id,
-          { input, config },
-          { threadId, status: "pending", metadata: { ...metadata, workerId: worker.workerId, workerType: worker.workerType } }
-        );
-
-        const workerClient = this.workerRegistry.getWorkerClient(worker.workerId);
-        if (workerClient) {
-          try {
-            await workerClient.startRun({
-              runId,
-              threadId,
-              graphId: assistant.graph_id,
-              checkpointUri: this.config.databaseUrl,
-              config: { ...assistant.config, ...config },
-              inputs: input,
-              metadata: metadata || {},
-            });
-            await this.postgresAdapter.runs.updateStatus(runId, "running");
-            this.workerRegistry.updateWorkerMetrics(worker.workerId, {
-              activeTasks: (worker.metrics?.activeTasks ?? 0) + 1,
-              totalTasks: (worker.metrics?.totalTasks ?? 0) + 1,
-            });
-          } catch (err) {
-            logger.error(`Start run failed on worker ${worker.workerId}:`, err);
-            await this.postgresAdapter.runs.updateStatus(runId, "failed", { error: err instanceof Error ? err.message : "Worker error" });
-          }
-        }
-
-        return c.json({ run_id: runId }, 201);
-      } catch (error) {
-        logger.error("Failed to create run:", error);
-        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
-      }
-    });
-
-    // 获取运行事件流（SSE 转发）
-    this.app.get("/threads/:threadId/runs/:runId/stream", async (c) => {
-      const runId = c.req.param("runId");
-      try {
-        const run = await this.postgresAdapter.runs.get(runId);
-        if (!run) return c.json({ error: "Run not found" }, 404);
-        const workerId = run.metadata?.workerId;
-        if (!workerId) return c.json({ error: "No worker assigned" }, 400);
-        const workerClient = this.workerRegistry.getWorkerClient(workerId);
-        if (!workerClient) return c.json({ error: "Worker not available" }, 503);
-
-        // SSE 响应头
-        c.header("Content-Type", "text/event-stream");
-        c.header("Cache-Control", "no-cache");
-        c.header("Connection", "keep-alive");
-
-        return new Response(
-          new ReadableStream({
-            async start(controller) {
-              try {
-                for await (const event of workerClient.getRunStream(runId)) {
-                  const sseData = `data: ${JSON.stringify(event)}\n\n`;
-                  controller.enqueue(new TextEncoder().encode(sseData));
-                  // 事件同时写入 Redis Streams 持久化（供回放与调试）
-                  await (async () => {
-                    try {
-                      await this.redisStreamManager.publish(runId, event.event, event.data);
-                    } catch (e) {
-                      logger.warn(`Persist SSE event failed for ${runId}:`, e);
-                    }
-                  })();
-
-                  if (event.event === "done" || event.event === "error") {
-                    const status = event.event === "done" ? "completed" : "failed";
-                    await this.postgresAdapter.runs.updateStatus(runId, status, event.data);
-                    const worker = this.workerRegistry.getWorkers().find((w) => w.workerId === workerId);
-                    if (worker) {
-                      this.workerRegistry.updateWorkerMetrics(workerId, {
-                        activeTasks: Math.max(0, (worker.metrics?.activeTasks ?? 1) - 1),
-                      });
-                    }
-                    break;
-                  }
-                }
-              } catch (err) {
-                logger.error(`Stream error for run ${runId}:`, err);
-                const errorData = `data: ${JSON.stringify({ event: "error", data: { message: "Stream error" } })}\n\n`;
-                controller.enqueue(new TextEncoder().encode(errorData));
-              } finally {
-                controller.close();
-              }
-            },
-          }),
-          {
-            headers: {
-              "Content-Type": "text/event-stream",
-              "Cache-Control": "no-cache",
-              "Connection": "keep-alive",
-            },
-          }
-        );
-      } catch (error) {
-        logger.error(`Failed to get stream for run ${runId}:`, error);
-        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
-      }
-    });
-
-    // 取消运行
-    this.app.post("/threads/:threadId/runs/:runId/cancel", async (c) => {
-      const runId = c.req.param("runId");
-      try {
-        const body = await c.req.json();
-        const action = body.action || "interrupt";
-        const run = await this.postgresAdapter.runs.get(runId);
-        if (!run) return c.json({ error: "Run not found" }, 404);
-        const workerId = run.metadata?.workerId;
-        if (workerId) {
-          const workerClient = this.workerRegistry.getWorkerClient(workerId);
-          if (workerClient) await workerClient.cancelRun(runId, action);
-        }
-        await this.redisCancellationManager.sendCancelSignal(runId, action);
-        await this.postgresAdapter.runs.updateStatus(runId, "cancelled", { action });
-        return c.json({ success: true });
-      } catch (error) {
-        logger.error(`Failed to cancel run ${runId}:`, error);
-        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
-      }
-    });
-  }
+  // 自定义运行 API 已抽到 api/system/runs.custom.mts
 
   // 启动服务与健康检查
   async start(): Promise<void> {
