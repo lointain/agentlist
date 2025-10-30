@@ -1,4 +1,5 @@
-import { z } from "zod/v3";
+// 使用 zod 主入口，避免 zod/v3 的模块解析错误
+import { z } from "zod";
 import type { Checkpoint, RunnableConfig } from "../storage/types.mjs";
 
 const ConfigSchema = z.object({

@@ -9,13 +9,13 @@ import type {
 } from "@langchain/langgraph";
 import type { Pregel } from "@langchain/langgraph/pregel";
 import { Client as LangSmithClient, getDefaultProjectName } from "langsmith";
-import { getLangGraphCommand } from "./command.mjs";
-import { checkLangGraphSemver } from "./semver/index.mjs";
-import type { Checkpoint, Run, RunnableConfig } from "./storage/types.mjs";
+import { getLangGraphCommand } from "./command.mts";
+import { checkLangGraphSemver } from "./semver/index.mts";
+import type { Checkpoint, Run, RunnableConfig } from "./storage/types.mts";
 import {
   runnableConfigToCheckpoint,
   taskRunnableConfigToCheckpoint,
-} from "./utils/runnableConfig.mjs";
+} from "./utils/runnableConfig.mts";
 
 type LangGraphStreamMode = Pregel<any, any>["streamMode"][number];
 

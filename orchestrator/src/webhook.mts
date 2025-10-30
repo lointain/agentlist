@@ -1,7 +1,7 @@
-import type { Run } from "./storage/types.mjs";
-import type { StreamCheckpoint } from "./stream.mjs";
-import { serializeError } from "./utils/serde.mjs";
-import { getLoopbackFetch } from "./loopback.mjs";
+import type { Run } from "./storage/types.mts";
+import type { StreamCheckpoint } from "./stream.mts";
+import { serializeError } from "./utils/serde.mts";
+import { getLoopbackFetch } from "./loopback.mts";
 
 export async function callWebhook(result: {
   checkpoint: StreamCheckpoint | undefined;

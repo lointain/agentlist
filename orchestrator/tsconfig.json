@@ -7,10 +7,15 @@
     "resolveJsonModule": true,
     "declaration": true,
     "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
     "allowJs": true,
     "jsx": "react-jsx",
     "noUnusedLocals": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
-  "exclude": ["scripts/*", "dist/*"]
+  "include": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "src/**/*.d.ts"],
+  "exclude": ["scripts/*", "dist/*", "tests/*"]
 }

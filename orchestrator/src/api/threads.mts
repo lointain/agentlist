@@ -3,12 +3,12 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { v4 as uuid4 } from "uuid";
 
-import { z } from "zod/v3";
-import * as schemas from "../schemas.mjs";
-import { stateSnapshotToThreadState } from "../state.mjs";
-import { threads } from "../storage/context.mjs";
-import type { RunnableConfig, ThreadSelectField } from "../storage/types.mjs";
-import { jsonExtra } from "../utils/hono.mjs";
+import { z } from "zod";
+import * as schemas from "../schemas.mts";
+import { stateSnapshotToThreadState } from "../state.mts";
+import { threads } from "../storage/context.mts";
+import type { RunnableConfig, ThreadSelectField } from "../storage/types.mts";
+import { jsonExtra } from "../utils/hono.mts";
 
 const api = new Hono();
 

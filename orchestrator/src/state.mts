@@ -2,9 +2,9 @@ import type {
   LangGraphRunnableConfig,
   StateSnapshot,
 } from "@langchain/langgraph";
-import type { ThreadState, Checkpoint } from "./storage/types.mjs";
-import { runnableConfigToCheckpoint } from "./utils/runnableConfig.mjs";
-import { serializeError } from "./utils/serde.mjs";
+import type { ThreadState, Checkpoint } from "./storage/types.mts";
+import { runnableConfigToCheckpoint } from "./utils/runnableConfig.mts";
+import { serializeError } from "./utils/serde.mts";
 
 const isStateSnapshot = (
   state: StateSnapshot | LangGraphRunnableConfig

@@ -1,7 +1,7 @@
-import { z } from "zod/v3";
+import { z } from "zod";
 
 import * as uuid from "uuid";
-import type { AssistantsRepo } from "../storage/types.mjs";
+import type { AssistantsRepo } from "../storage/types.mts";
 import type {
   BaseCheckpointSaver,
   BaseStore,
@@ -9,12 +9,12 @@ import type {
   LangGraphRunnableConfig,
 } from "@langchain/langgraph";
 import { HTTPException } from "hono/http-exception";
-import { type CompiledGraphFactory, resolveGraph } from "./load.utils.mjs";
-import type { GraphSchema, GraphSpec } from "./parser/index.mjs";
-import { getStaticGraphSchema } from "./parser/index.mjs";
-import { checkpointer } from "../storage/checkpoint.mjs";
-import { store } from "../storage/store.mjs";
-import { logger } from "../logging.mjs";
+import { type CompiledGraphFactory, resolveGraph } from "./load.utils.mts";
+import type { GraphSchema, GraphSpec } from "./parser/index.mts";
+import { getStaticGraphSchema } from "./parser/index.mts";
+// 移除文件系统 checkpointer，改由 worker-js 执行时基于数据库实现
+import { storeDb } from "../storage/store.db.mts";
+import { logger } from "../logging.mts";
 
 export const GRAPHS: Record<
   string,
@@ -91,13 +91,11 @@ export async function getGraph(
       ? await GRAPHS[graphId](config ?? { configurable: {} })
       : GRAPHS[graphId];
 
-  if (typeof options?.checkpointer !== "undefined") {
-    compiled.checkpointer = options?.checkpointer ?? undefined;
-  } else {
-    compiled.checkpointer = checkpointer;
-  }
+  // orchestrator 不再默认提供 checkpointer，交由 worker-js 侧实现
+  compiled.checkpointer = typeof options?.checkpointer !== "undefined" ? options?.checkpointer ?? undefined : undefined;
 
-  compiled.store = options?.store ?? store;
+  // 默认使用 Postgres 版 store（如未配置数据库则为 undefined）
+  compiled.store = typeof options?.store !== "undefined" ? options?.store ?? undefined : storeDb;
 
   return compiled;
 }

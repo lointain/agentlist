@@ -1,53 +1,68 @@
-// AgentList Orchestrator 服务�?// 集成 PostgreSQL、Redis Streams �?Worker 管理的高并发版本
+// Orchestrator 主服务
+// 集成 PostgreSQL、Redis Streams 与 Worker 注册与调度
+// 说明：本文件经过全面清理以修复大量 TS 语法错误与乱码注释问题
 
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { contextStorage } from "hono/context-storage";
 import { z } from "zod";
 import dotenv from "dotenv";
+import crypto from "node:crypto";
 
-// 导入存储适配�?import { PostgresAdapter } from "./storage/postgres.mts";
+// 存储与队列适配器
+import { PostgresAdapter } from "./storage/postgres.mts";
 import { RedisStreamManager, RedisLockManager, RedisCancellationManager } from "./storage/redis-streams.mts";
 
-// 导入 Worker 管理
+// Worker 管理
 import { WorkerRegistry } from "./worker/registry.mts";
 
-// 导入中间�?import { createMultiLevelRateLimit } from "./middleware/rate-limit.mts";
+// 中间件与工具
+import { createMultiLevelRateLimit } from "./middleware/rate-limit.mts";
+import { logger, requestLogger } from "./logging.mts";
+// 中间件：拆分后的独立文件
+import { cors } from "./middleware/cors.mts";
+import { ensureContentType } from "./middleware/content-type.mts";
+import { ensureAuth } from "./middleware/auth.mts";
+import auth from "./api/auth.mts";
 
-// 导入原有 API 路由（需要适配�?import runs from "./api/runs.mts";
+// 原有路由（保持兼容）
+import runs from "./api/runs.mts";
 import threads from "./api/threads.mts";
 import assistants from "./api/assistants.mts";
 import store from "./api/store.mts";
 import meta from "./api/meta.mts";
 
-// 导入工具
-import { logger, requestLogger } from "./logging.mts";
-import { cors, ensureContentType } from "./http/middleware.mts";
-
-// 加载环境变量
+// 配置与环境变量解析
 dotenv.config();
 
+// 服务器配置接口
 export interface ServerConfig {
   port: number;
   host: string;
-  
-  // 数据库配�?  databaseUrl: string;
+  databaseUrl: string;
   redisUrl: string;
-  
-  // Worker 配置
-  workers: {
-    js?: string;
-    python?: string;
-  };
-  
-  // 功能开�?  enableRateLimit: boolean;
+  workers: { js?: string; python?: string };
+  enableRateLimit: boolean;
   enableAuth: boolean;
-  
-  // 性能配置
   maxConnections: number;
   healthCheckInterval: number;
 }
 
+// 使用 zod 校验环境变量（类型安全）
+export const ServerConfigSchema = z.object({
+  PORT: z.string().default("8000"),
+  HOST: z.string().default("0.0.0.0"),
+  DATABASE_URL: z.string(),
+  REDIS_URL: z.string(),
+  WORKER_JS_URL: z.string().optional(),
+  WORKER_PY_URL: z.string().optional(),
+  ENABLE_RATE_LIMIT: z.string().default("true"),
+  ENABLE_AUTH: z.string().default("false"),
+  MAX_CONNECTIONS: z.string().default("10"),
+  HEALTH_CHECK_INTERVAL: z.string().default("10000"),
+});
+
+// 主服务类
 export class AgentListServer {
   private app: Hono;
   private postgresAdapter: PostgresAdapter;
@@ -60,69 +75,73 @@ export class AgentListServer {
   constructor(config: ServerConfig) {
     this.config = config;
     this.app = new Hono();
-    
-    // 初始化存储适配�?    this.postgresAdapter = new PostgresAdapter({
+
+    // 初始化存储适配器（连接池）
+    this.postgresAdapter = new PostgresAdapter({
       connectionString: config.databaseUrl,
       maxConnections: config.maxConnections,
     });
 
-    // 初始�?Redis 组件
+    // 初始化 Redis 组件（队列/锁/取消）
     const redisConfig = { url: config.redisUrl };
     this.redisStreamManager = new RedisStreamManager(redisConfig);
     this.redisLockManager = new RedisLockManager(redisConfig);
     this.redisCancellationManager = new RedisCancellationManager(redisConfig);
 
-    // 初始�?Worker 注册�?    this.workerRegistry = new WorkerRegistry(config.healthCheckInterval);
+    // 初始化 Worker 注册表与健康检查
+    this.workerRegistry = new WorkerRegistry(config.healthCheckInterval);
 
+    // 安装中间件与路由
     this.setupMiddleware();
     this.setupRoutes();
   }
 
+  // 安装通用中间件（日志、CORS、限流、依赖注入）
   private setupMiddleware(): void {
-    // 基础中间�?    this.app.use("*", contextStorage());
+    this.app.use("*", contextStorage());
     this.app.use("*", requestLogger());
     this.app.use("*", cors());
     this.app.use("*", ensureContentType());
 
-    // 限流中间�?    if (this.config.enableRateLimit) {
-      const rateLimitMiddleware = createMultiLevelRateLimit(
-        // 传入 Redis 实例用于跨实例共�?        this.redisStreamManager['redis'] // 复用 Redis 连接
-      );
-      
-      rateLimitMiddleware.forEach(middleware => {
-        this.app.use("*", middleware);
-      });
+    if (this.config.enableAuth) {
+      this.app.use("*", ensureAuth({ exempt: ["/health", "/auth/*"] }));
     }
 
-    // 注入依赖到上下文
+    if (this.config.enableRateLimit) {
+      // 说明：限流复用 Redis 连接（高性能）
+      const rateLimitMiddleware = createMultiLevelRateLimit(
+        // @ts-expect-error 兼容内部实现：从管理器暴露 redis 实例
+        this.redisStreamManager["redis"]
+      );
+      rateLimitMiddleware.forEach((m) => this.app.use("*", m));
+    }
+
+    // 注入依赖到请求上下文（方便各路由访问）
     this.app.use("*", async (c, next) => {
-      // 注入存储适配�?      c.set('postgres', this.postgresAdapter);
-      c.set('redisStreams', this.redisStreamManager);
-      c.set('redisLocks', this.redisLockManager);
-      c.set('redisCancellation', this.redisCancellationManager);
-      c.set('workerRegistry', this.workerRegistry);
-      
+      c.set("postgres", this.postgresAdapter);
+      c.set("redisStreams", this.redisStreamManager);
+      c.set("redisLocks", this.redisLockManager);
+      c.set("redisCancellation", this.redisCancellationManager);
+      c.set("workerRegistry", this.workerRegistry);
       await next();
     });
   }
 
+  // 注册所有路由
   private setupRoutes(): void {
-    // 健康检�?    this.app.get('/health', async (c) => {
+    // 健康检查
+    this.app.get("/health", async (c) => {
       try {
-        // 检查数据库连接
         await this.postgresAdapter.runs.search({ limit: 1 });
-        
-        // 检�?Redis 连接
-        await this.redisStreamManager['redis'].ping();
-        
-        // 获取 Worker 状�?        const workers = this.workerRegistry.getWorkers();
+        // @ts-expect-error 兼容内部实现：从管理器暴露 redis 实例
+        await this.redisStreamManager["redis"].ping();
+        const workers = this.workerRegistry.getWorkers();
         const healthyWorkers = this.workerRegistry.getHealthyWorkers();
-        
         return c.json({
-          status: 'healthy',
+          status: "healthy",
           timestamp: new Date().toISOString(),
-          database: 'connected',
-          redis: 'connected',
+          database: "connected",
+          redis: "connected",
           workers: {
             total: workers.length,
             healthy: healthyWorkers.length,
@@ -130,11 +149,14 @@ export class AgentListServer {
           },
         });
       } catch (error) {
-        logger.error('Health check failed:', error);
-        return c.json({
-          status: 'unhealthy',
-          error: error instanceof Error ? error.message : 'Unknown error',
-        }, 503);
+        logger.error("Health check failed:", error);
+        return c.json(
+          {
+            status: "unhealthy",
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
+          503
+        );
       }
     });
 
@@ -144,119 +166,104 @@ export class AgentListServer {
     // 指标 API
     this.setupMetricsRoutes();
 
-    // 原有 API 路由（需要适配新的存储层）
-    this.app.route('/assistants', assistants);
-    this.app.route('/threads', threads);
-    this.app.route('/runs', runs);
-    this.app.route('/store', store);
-    this.app.route('/', meta);
+    // 认证路由
+    this.app.route("/auth", auth);
 
-    // 自定义运�?API - 集成 Worker 调度
+    // 兼容原有 API 路由
+    this.app.route("/assistants", assistants);
+    this.app.route("/threads", threads);
+    this.app.route("/runs", runs);
+    this.app.route("/store", store);
+    this.app.route("/", meta);
+
+    // 自定义运行 API - 调度 Worker 并转发 SSE
     this.setupCustomRunsAPI();
   }
 
+  // Worker 管理路由（注册、列表、健康）
   private setupWorkerRoutes(): void {
-    // 获取 Worker 列表
-    this.app.get('/workers', async (c) => {
+    // 注册 Worker
+    this.app.post("/workers/register", async (c) => {
+      try {
+        const body = await c.req.json();
+        // 必要字段：workerId/workerType/url
+        const workerId: string = body.workerId || crypto.randomUUID();
+        const workerType: string = body.workerType || "js";
+        const url: string = body.url;
+        if (!url) {
+          return c.json({ error: "Missing worker url" }, 400);
+        }
+
+        this.workerRegistry.registerWorker({ workerId, workerType, url });
+        return c.json({ workerId, workerType, url }, 201);
+      } catch (error) {
+        logger.error("Failed to register worker:", error);
+        return c.json({ error: "Internal error" }, 500);
+      }
+    });
+
+    // Worker 列表
+    this.app.get("/workers", (c) => {
       const workers = this.workerRegistry.getWorkers();
       return c.json(workers);
     });
 
-    // 注册 Worker
-    this.app.post('/workers/register', async (c) => {
-      const body = await c.req.json();
-      await this.workerRegistry.registerWorker(body);
-      return c.json({ success: true });
-    });
-
-    // 注销 Worker
-    this.app.delete('/workers/:workerId', async (c) => {
-      const workerId = c.req.param('workerId');
-      await this.workerRegistry.unregisterWorker(workerId);
-      return c.json({ success: true });
-    });
-
-    // Worker 心跳
-    this.app.post('/workers/:workerId/heartbeat', async (c) => {
-      const workerId = c.req.param('workerId');
-      this.workerRegistry.updateHeartbeat(workerId);
-      return c.json({ success: true });
+    // Worker 健康
+    this.app.get("/workers/:workerId/health", (c) => {
+      const workerId = c.req.param("workerId");
+      const worker = this.workerRegistry.getWorkers().find((w) => w.workerId === workerId);
+      if (!worker) return c.json({ error: "Worker not found" }, 404);
+      return c.json({ workerId, status: worker.status });
     });
   }
 
+  // 指标路由
   private setupMetricsRoutes(): void {
-    // 队列深度
-    this.app.get('/metrics/queue-depth', async (c) => {
-      const pendingRuns = await this.postgresAdapter.runs.search({
-        status: ['pending'],
-        limit: 1000,
-      });
-      
-      return c.json({
-        queueDepth: pendingRuns.length,
-        timestamp: new Date().toISOString(),
-      });
+    // 队列深度（pending runs 数量）
+    this.app.get("/metrics/queue-depth", async (c) => {
+      const pendingRuns = await this.postgresAdapter.runs.search({ status: ["pending"], limit: 1000 });
+      return c.json({ queueDepth: pendingRuns.length, timestamp: new Date().toISOString() });
     });
 
-    // Worker 状�?    this.app.get('/metrics/workers', async (c) => {
+    // Worker 状态聚合指标
+    this.app.get("/metrics/workers", (c) => {
       const workers = this.workerRegistry.getWorkers();
-      const metrics = workers.map(w => ({
+      const metrics = workers.map((w) => ({
         workerId: w.workerId,
         workerType: w.workerType,
         status: w.status,
-        activeTasks: w.metrics.activeTasks,
-        totalTasks: w.metrics.totalTasks,
-        avgResponseTime: w.metrics.avgResponseTime,
-        errorRate: w.metrics.errorRate,
+        activeTasks: w.metrics?.activeTasks ?? 0,
+        totalTasks: w.metrics?.totalTasks ?? 0,
+        avgResponseTime: w.metrics?.avgResponseTime ?? 0,
+        errorRate: w.metrics?.errorRate ?? 0,
       }));
-      
       return c.json(metrics);
     });
   }
 
+  // 创建/取消/流式获取运行，调度到 Worker
   private setupCustomRunsAPI(): void {
-    // 创建运行 - 集成 Worker 调度
-    this.app.post('/threads/:threadId/runs', async (c) => {
+    // 创建运行
+    this.app.post("/threads/:threadId/runs", async (c) => {
       try {
-        const threadId = c.req.param('threadId');
+        const threadId = c.req.param("threadId");
         const body = await c.req.json();
-        
         const { assistant_id, input, config, metadata } = body;
-        
-        // 获取助手信息
+
         const assistant = await this.postgresAdapter.assistants.get(assistant_id);
-        if (!assistant) {
-          return c.json({ error: 'Assistant not found' }, 404);
-        }
+        if (!assistant) return c.json({ error: "Assistant not found" }, 404);
 
-        // 选择合适的 Worker
         const worker = this.workerRegistry.selectWorker(assistant.graph_id);
-        if (!worker) {
-          return c.json({ 
-            error: `No available worker for graph: ${assistant.graph_id}` 
-          }, 503);
-        }
+        if (!worker) return c.json({ error: `No worker for graph ${assistant.graph_id}` }, 503);
 
-        // 生成运行 ID
         const runId = crypto.randomUUID();
-        
-        // 创建运行记录
         await this.postgresAdapter.runs.put(
           runId,
           assistant_id,
           { input, config },
-          { 
-            threadId, 
-            status: 'pending',
-            metadata: { 
-              ...metadata, 
-              workerId: worker.workerId,
-              workerType: worker.workerType 
-            }
-          }
+          { threadId, status: "pending", metadata: { ...metadata, workerId: worker.workerId, workerType: worker.workerType } }
         );
 
-        // 调度�?Worker
         const workerClient = this.workerRegistry.getWorkerClient(worker.workerId);
         if (workerClient) {
           try {
@@ -269,237 +276,164 @@ export class AgentListServer {
               inputs: input,
               metadata: metadata || {},
             });
-
-            // 更新运行状�?            await this.postgresAdapter.runs.updateStatus(runId, 'running');
-            
-            // 更新 Worker 指标
+            await this.postgresAdapter.runs.updateStatus(runId, "running");
             this.workerRegistry.updateWorkerMetrics(worker.workerId, {
-              activeTasks: worker.metrics.activeTasks + 1,
-              totalTasks: worker.metrics.totalTasks + 1,
+              activeTasks: (worker.metrics?.activeTasks ?? 0) + 1,
+              totalTasks: (worker.metrics?.totalTasks ?? 0) + 1,
             });
-
-          } catch (error) {
-            logger.error(`Failed to start run on worker ${worker.workerId}:`, error);
-            await this.postgresAdapter.runs.updateStatus(runId, 'failed', {
-              error: error instanceof Error ? error.message : 'Worker error'
-            });
+          } catch (err) {
+            logger.error(`Start run failed on worker ${worker.workerId}:`, err);
+            await this.postgresAdapter.runs.updateStatus(runId, "failed", { error: err instanceof Error ? err.message : "Worker error" });
           }
         }
 
         return c.json({ run_id: runId }, 201);
-        
       } catch (error) {
-        logger.error('Failed to create run:', error);
-        return c.json({ 
-          error: error instanceof Error ? error.message : 'Internal error' 
-        }, 500);
+        logger.error("Failed to create run:", error);
+        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
       }
     });
 
-    // 获取运行�?- �?Worker 转发 SSE
-    this.app.get('/threads/:threadId/runs/:runId/stream', async (c) => {
-      const runId = c.req.param('runId');
-      
+    // 获取运行事件流（SSE 转发）
+    this.app.get("/threads/:threadId/runs/:runId/stream", async (c) => {
+      const runId = c.req.param("runId");
       try {
-        // 获取运行信息
         const run = await this.postgresAdapter.runs.get(runId);
-        if (!run) {
-          return c.json({ error: 'Run not found' }, 404);
-        }
-
+        if (!run) return c.json({ error: "Run not found" }, 404);
         const workerId = run.metadata?.workerId;
-        if (!workerId) {
-          return c.json({ error: 'No worker assigned to this run' }, 400);
-        }
-
+        if (!workerId) return c.json({ error: "No worker assigned" }, 400);
         const workerClient = this.workerRegistry.getWorkerClient(workerId);
-        if (!workerClient) {
-          return c.json({ error: 'Worker not available' }, 503);
-        }
+        if (!workerClient) return c.json({ error: "Worker not available" }, 503);
 
-        // 设置 SSE 响应�?        c.header('Content-Type', 'text/event-stream');
-        c.header('Cache-Control', 'no-cache');
-        c.header('Connection', 'keep-alive');
+        // SSE 响应头
+        c.header("Content-Type", "text/event-stream");
+        c.header("Cache-Control", "no-cache");
+        c.header("Connection", "keep-alive");
 
-        // 创建流响�?        return new Response(
+        return new Response(
           new ReadableStream({
             async start(controller) {
               try {
-                // �?Worker 获取事件流并转发
                 for await (const event of workerClient.getRunStream(runId)) {
                   const sseData = `data: ${JSON.stringify(event)}\n\n`;
                   controller.enqueue(new TextEncoder().encode(sseData));
-                  
-                  // 同时写入 Redis Streams 用于持久�?                  await this.redisStreamManager.publish(runId, event.event, event.data);
-                  
-                  // 如果是结束事件，更新运行状�?                  if (event.event === 'done' || event.event === 'error') {
-                    const status = event.event === 'done' ? 'completed' : 'failed';
+                  // 事件同时写入 Redis Streams 持久化（供回放与调试）
+                  await (async () => {
+                    try {
+                      await this.redisStreamManager.publish(runId, event.event, event.data);
+                    } catch (e) {
+                      logger.warn(`Persist SSE event failed for ${runId}:`, e);
+                    }
+                  })();
+
+                  if (event.event === "done" || event.event === "error") {
+                    const status = event.event === "done" ? "completed" : "failed";
                     await this.postgresAdapter.runs.updateStatus(runId, status, event.data);
-                    
-                    // 更新 Worker 指标
-                    const worker = this.workerRegistry.getWorkers()
-                      .find(w => w.workerId === workerId);
+                    const worker = this.workerRegistry.getWorkers().find((w) => w.workerId === workerId);
                     if (worker) {
                       this.workerRegistry.updateWorkerMetrics(workerId, {
-                        activeTasks: Math.max(0, worker.metrics.activeTasks - 1),
+                        activeTasks: Math.max(0, (worker.metrics?.activeTasks ?? 1) - 1),
                       });
                     }
                     break;
                   }
                 }
-              } catch (error) {
-                logger.error(`Stream error for run ${runId}:`, error);
-                const errorData = `data: ${JSON.stringify({
-                  event: 'error',
-                  data: { message: 'Stream error' }
-                })}\n\n`;
+              } catch (err) {
+                logger.error(`Stream error for run ${runId}:`, err);
+                const errorData = `data: ${JSON.stringify({ event: "error", data: { message: "Stream error" } })}\n\n`;
                 controller.enqueue(new TextEncoder().encode(errorData));
               } finally {
                 controller.close();
               }
-            }
+            },
           }),
           {
             headers: {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-            }
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              "Connection": "keep-alive",
+            },
           }
         );
-
       } catch (error) {
         logger.error(`Failed to get stream for run ${runId}:`, error);
-        return c.json({ 
-          error: error instanceof Error ? error.message : 'Internal error' 
-        }, 500);
+        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
       }
     });
 
     // 取消运行
-    this.app.post('/threads/:threadId/runs/:runId/cancel', async (c) => {
-      const runId = c.req.param('runId');
-      const body = await c.req.json();
-      const action = body.action || 'interrupt';
-      
+    this.app.post("/threads/:threadId/runs/:runId/cancel", async (c) => {
+      const runId = c.req.param("runId");
       try {
+        const body = await c.req.json();
+        const action = body.action || "interrupt";
         const run = await this.postgresAdapter.runs.get(runId);
-        if (!run) {
-          return c.json({ error: 'Run not found' }, 404);
-        }
-
+        if (!run) return c.json({ error: "Run not found" }, 404);
         const workerId = run.metadata?.workerId;
         if (workerId) {
           const workerClient = this.workerRegistry.getWorkerClient(workerId);
-          if (workerClient) {
-            await workerClient.cancelRun(runId, action);
-          }
+          if (workerClient) await workerClient.cancelRun(runId, action);
         }
-
-        // 发送取消信�?        await this.redisCancellationManager.sendCancelSignal(runId, action);
-        
-        // 更新运行状�?        await this.postgresAdapter.runs.updateStatus(runId, 'cancelled', { action });
-
+        await this.redisCancellationManager.sendCancelSignal(runId, action);
+        await this.postgresAdapter.runs.updateStatus(runId, "cancelled", { action });
         return c.json({ success: true });
-        
       } catch (error) {
         logger.error(`Failed to cancel run ${runId}:`, error);
-        return c.json({ 
-          error: error instanceof Error ? error.message : 'Internal error' 
-        }, 500);
+        return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
       }
     });
   }
 
+  // 启动服务与健康检查
   async start(): Promise<void> {
-    // 注册预配置的 Worker
     await this.registerConfiguredWorkers();
-    
-    // 启动 Worker 健康检�?    this.workerRegistry.startHealthCheck();
-    
-    // 启动服务�?    const server = serve({
-      fetch: this.app.fetch,
-      port: this.config.port,
-      hostname: this.config.host,
-    });
-
-    logger.info(`AgentList Orchestrator started on ${this.config.host}:${this.config.port}`);
-    logger.info(`Database: ${this.config.databaseUrl.replace(/\/\/.*@/, '//***@')}`);
-    logger.info(`Redis: ${this.config.redisUrl.replace(/\/\/.*@/, '//***@')}`);
-    
-    return server;
+    this.workerRegistry.startHealthCheck();
+    serve({ fetch: this.app.fetch, port: this.config.port, hostname: this.config.host });
+    logger.info(`Orchestrator started at ${this.config.host}:${this.config.port}`);
+    logger.info(`Database: ${this.config.databaseUrl.replace(/\/\/.*@/, "//***@")}`);
+    logger.info(`Redis: ${this.config.redisUrl.replace(/\/\/.*@/, "//***@")}`);
   }
 
+  // 停止服务（关闭连接）
   async stop(): Promise<void> {
-    // 停止健康检�?    this.workerRegistry.stopHealthCheck();
-    
-    // 关闭连接
-    await this.postgresAdapter.close();
-    await this.redisStreamManager.close();
-    await this.redisLockManager.close();
-    await this.redisCancellationManager.close();
-    
-    logger.info('AgentList Orchestrator stopped');
+    this.workerRegistry.stopHealthCheck();
+    try { await this.postgresAdapter.close(); } catch {}
+    try { await this.redisStreamManager.close(); } catch {}
+    try { await this.redisLockManager.close(); } catch {}
+    try { await this.redisCancellationManager.close(); } catch {}
+    logger.info("Orchestrator stopped");
   }
 
+  // 根据环境变量注册预配置的 Worker
   private async registerConfiguredWorkers(): Promise<void> {
-    const { workers } = this.config;
-    
-    if (workers.js) {
-      await this.workerRegistry.registerWorker({
-        workerId: 'worker-js-1',
-        workerType: 'js',
-        endpointUrl: workers.js,
-        status: 'active',
-        capabilities: {
-          graphs: ['*'], // 支持所有图
-        },
-        lastHeartbeat: new Date(),
-      });
-    }
-
-    if (workers.python) {
-      await this.workerRegistry.registerWorker({
-        workerId: 'worker-python-1',
-        workerType: 'python',
-        endpointUrl: workers.python,
-        status: 'active',
-        capabilities: {
-          graphs: ['*'], // 支持所有图
-        },
-        lastHeartbeat: new Date(),
-      });
-    }
+    const jsUrl = process.env.WORKER_JS_URL || this.config.workers.js;
+    const pyUrl = process.env.WORKER_PY_URL || this.config.workers.python;
+    if (jsUrl) this.workerRegistry.registerWorker({ workerId: "worker-js", workerType: "js", url: jsUrl });
+    if (pyUrl) this.workerRegistry.registerWorker({ workerId: "worker-py", workerType: "python", url: pyUrl });
   }
 }
 
-// 启动服务器的便捷函数
-export async function startServer(config?: Partial<ServerConfig>): Promise<AgentListServer> {
-  const defaultConfig: ServerConfig = {
-    port: parseInt(process.env.PORT || '8080'),
-    host: process.env.HOST || '0.0.0.0',
-    databaseUrl: process.env.DATABASE_URL || 'postgresql://agentlist:agentlist123@localhost:5432/agentlist',
-    redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-    workers: {
-      js: process.env.WORKER_JS_URL,
-      python: process.env.WORKER_PYTHON_URL,
-    },
-    enableRateLimit: process.env.ENABLE_RATE_LIMIT !== 'false',
-    enableAuth: process.env.ENABLE_AUTH === 'true',
-    maxConnections: parseInt(process.env.MAX_CONNECTIONS || '20'),
-    healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || '30000'),
+// 从环境变量构建配置并运行
+export function startServerFromEnv(): AgentListServer {
+  const env = ServerConfigSchema.parse(process.env);
+  const config: ServerConfig = {
+    port: Number(env.PORT),
+    host: env.HOST,
+    databaseUrl: env.DATABASE_URL,
+    redisUrl: env.REDIS_URL,
+    workers: { js: env.WORKER_JS_URL, python: env.WORKER_PY_URL },
+    enableRateLimit: env.ENABLE_RATE_LIMIT === "true",
+    enableAuth: env.ENABLE_AUTH === "true",
+    maxConnections: Number(env.MAX_CONNECTIONS),
+    healthCheckInterval: Number(env.HEALTH_CHECK_INTERVAL),
   };
-
-  const finalConfig = { ...defaultConfig, ...config };
-  const server = new AgentListServer(finalConfig);
-  
-  await server.start();
+  const server = new AgentListServer(config);
   return server;
 }
 
-// 如果直接运行此文件，启动服务�?if (import.meta.url === `file://${process.argv[1]}`) {
-  startServer().catch(error => {
-    logger.error('Failed to start server:', error);
-    process.exit(1);
-  });
+// 程序入口（可用于直接启动）
+export async function main(): Promise<void> {
+  const server = startServerFromEnv();
+  await server.start();
 }
+

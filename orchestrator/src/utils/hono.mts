@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import { serialiseAsDict } from "./serde.mjs";
+import { serialiseAsDict } from "./serde.mts";
 import { stream } from "hono/streaming";
 import { StreamingApi } from "hono/utils/stream";
 

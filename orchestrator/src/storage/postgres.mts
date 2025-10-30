@@ -2,6 +2,10 @@
 // 基于 13-多用户高并发与持久化优化报告.md 的设计
 
 import { Pool, PoolClient } from 'pg';
+// 引入 Drizzle ORM（Node-Postgres 驱动）与表结构
+import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { eq, and, sql, inArray } from 'drizzle-orm';
+import { assistants as tblAssistants, threads as tblThreads, runs as tblRuns } from './schema.mts';
 import type { 
   RunsRepo, 
   ThreadsRepo, 
@@ -21,7 +25,9 @@ export interface PostgresConfig {
 }
 
 export class PostgresAdapter {
-  private pool: Pool;
+  public readonly pool: Pool;
+  // Drizzle 数据库实例（基于当前连接池）
+  private db: NodePgDatabase;
 
   constructor(config: PostgresConfig) {
     this.pool = new Pool({
@@ -30,6 +36,8 @@ export class PostgresAdapter {
       idleTimeoutMillis: config.idleTimeoutMillis ?? 30000,
       connectionTimeoutMillis: config.connectionTimeoutMillis ?? 2000,
     });
+    // 初始化 Drizzle 数据库实例
+    this.db = drizzle(this.pool);
   }
 
   async close(): Promise<void> {
@@ -37,21 +45,24 @@ export class PostgresAdapter {
   }
 
   get runs(): RunsRepo {
-    return new PostgresRuns(this.pool);
+    return new PostgresRuns(this.pool, this.db);
   }
 
   get threads(): ThreadsRepo {
-    return new PostgresThreads(this.pool);
+    return new PostgresThreads(this.pool, this.db);
   }
 
   get assistants(): AssistantsRepo {
-    return new PostgresAssistants(this.pool);
+    return new PostgresAssistants(this.pool, this.db);
   }
+
+  // 可选：暴露 checkpoints 仓库（当前未在 Ops 中使用）
+  // get checkpoints() { return new PostgresCheckpoints(this.db); }
 }
 
 // PostgreSQL Runs 实现 - 支持高并发调度
 export class PostgresRuns implements RunsRepo {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly db: NodePgDatabase) {}
 
   // 幂等插入：利用唯一索引 (run_id) + UPSERT
   async put(
@@ -68,80 +79,74 @@ export class PostgresRuns implements RunsRepo {
     } = {},
     auth?: any
   ): Promise<Run[]> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      // 1. 确保线程存在，如果不存在则创建
-      if (options.threadId) {
-        await client.query(
-          `INSERT INTO threads(thread_id, status, metadata, created_at, updated_at)
-           VALUES($1, 'idle', $2, NOW(), NOW())
-           ON CONFLICT(thread_id) DO NOTHING`,
-          [options.threadId, options.metadata ?? {}]
-        );
-      }
-
-      // 2. 检查是否允许插入（防止重复运行）
-      if (options.ifNotExists) {
-        const existingRun = await client.query(
-          'SELECT run_id FROM runs WHERE run_id = $1',
-          [runId]
-        );
-        if (existingRun.rowCount > 0) {
-          await client.query('COMMIT');
-          return this.getRunsByThread(options.threadId!, client);
-        }
-      }
-
-      // 3. 处理多任务策略
-      if (options.multitaskStrategy === 'reject' && options.threadId) {
-        const runningRuns = await client.query(
-          `SELECT run_id FROM runs 
-           WHERE thread_id = $1 AND status IN ('pending', 'running')`,
-          [options.threadId]
-        );
-        if (runningRuns.rowCount > 0) {
-          throw new Error(`Thread ${options.threadId} already has running tasks`);
-        }
-      }
-
-      // 4. 插入新的 run（幂等）
-      const scheduledAt = options.afterSeconds 
-        ? `NOW() + INTERVAL '${options.afterSeconds} seconds'`
-        : 'NOW()';
-
-      await client.query(
-        `INSERT INTO runs(
-          run_id, thread_id, assistant_id, status, kwargs, metadata, 
-          scheduled_at, created_at, updated_at
-        )
-        VALUES($1, $2, $3, $4, $5, $6, ${scheduledAt}, NOW(), NOW())
-        ON CONFLICT(run_id) DO UPDATE SET
-          status = EXCLUDED.status,
-          kwargs = EXCLUDED.kwargs,
-          metadata = EXCLUDED.metadata,
-          updated_at = NOW()`,
-        [
-          runId, 
-          options.threadId, 
-          assistantId, 
-          options.status ?? 'pending', 
-          JSON.stringify(kwargs), 
-          JSON.stringify(options.metadata ?? {})
-        ]
-      );
-
-      await client.query('COMMIT');
-      
-      // 返回该线程的在途 run 列表
-      return this.getRunsByThread(options.threadId!, client);
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
+    // 1) 确保线程存在：使用 Drizzle onConflictDoNothing
+    if (options.threadId) {
+      await this.db
+        .insert(tblThreads)
+        .values({
+          thread_id: options.threadId,
+          status: 'idle',
+          config: {},
+          metadata: options.metadata ?? {},
+          created_at: new Date(),
+          updated_at: new Date(),
+        })
+        .onConflictDoNothing({ target: tblThreads.thread_id });
     }
+
+    // 2) 如果要求不重复插入，先查存在
+    if (options.ifNotExists) {
+      const exists = await this.db
+        .select({ run_id: tblRuns.run_id })
+        .from(tblRuns)
+        .where(eq(tblRuns.run_id, runId));
+      if (exists.length > 0) {
+        return this.getRunsByThread(options.threadId!);
+      }
+    }
+
+    // 3) 多任务策略：reject 时检测该线程是否已有在途任务（保持原生 SQL，性能更优）
+    if (options.multitaskStrategy === 'reject' && options.threadId) {
+      const runningRuns = await this.pool.query(
+        `SELECT run_id FROM runs 
+         WHERE thread_id = $1 AND status IN ('pending', 'running')`,
+        [options.threadId]
+      );
+      if (runningRuns.rowCount > 0) {
+        throw new Error(`Thread ${options.threadId} already has running tasks`);
+      }
+    }
+
+    // 4) 插入/更新 run（幂等）——使用 Drizzle upsert
+    const scheduled_at = options.afterSeconds
+      ? new Date(Date.now() + options.afterSeconds * 1000)
+      : new Date();
+
+    await this.db
+      .insert(tblRuns)
+      .values({
+        run_id: runId,
+        thread_id: options.threadId!,
+        assistant_id: assistantId,
+        status: options.status ?? 'pending',
+        kwargs: kwargs ?? {},
+        metadata: options.metadata ?? {},
+        scheduled_at,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: tblRuns.run_id,
+        set: {
+          status: options.status ?? 'pending',
+          kwargs: kwargs ?? {},
+          metadata: options.metadata ?? {},
+          updated_at: new Date(),
+        },
+      });
+
+    // 返回该线程的在途 run 列表
+    return this.getRunsByThread(options.threadId!);
   }
 
   // 安全调度：一次性锁定一批待处理 run，避免多工作者抢占
@@ -227,29 +232,40 @@ export class PostgresRuns implements RunsRepo {
   }
 
   async get(runId: string): Promise<Run | null> {
-    const res = await this.pool.query(
-      `SELECT r.*, a.graph_id, a.config as assistant_config
-       FROM runs r
-       JOIN assistants a ON r.assistant_id = a.id
-       WHERE r.run_id = $1`,
-      [runId]
-    );
-    
-    if (res.rowCount === 0) return null;
-    
-    const row = res.rows[0];
+    // 用 Drizzle 执行联表查询
+    const rows = await this.db
+      .select({
+        run_id: tblRuns.run_id,
+        thread_id: tblRuns.thread_id,
+        assistant_id: tblRuns.assistant_id,
+        status: tblRuns.status,
+        kwargs: tblRuns.kwargs,
+        metadata: tblRuns.metadata,
+        attempt: tblRuns.attempt,
+        created_at: tblRuns.created_at,
+        updated_at: tblRuns.updated_at,
+        graph_id: tblAssistants.graph_id,
+        assistant_config: tblAssistants.config,
+      })
+      .from(tblRuns)
+      .innerJoin(tblAssistants, eq(tblRuns.assistant_id, tblAssistants.id))
+      .where(eq(tblRuns.run_id, runId))
+      .limit(1);
+
+    if (rows.length === 0) return null;
+    const row = rows[0];
     return {
-      run_id: row.run_id,
-      thread_id: row.thread_id,
-      assistant_id: row.assistant_id,
-      status: row.status,
-      kwargs: row.kwargs,
-      metadata: row.metadata,
-      graph_id: row.graph_id,
-      config: row.assistant_config,
-      attempt: row.attempt,
-      created_at: row.created_at,
-      updated_at: row.updated_at
+      run_id: row.run_id as unknown as string,
+      thread_id: row.thread_id as unknown as string,
+      assistant_id: row.assistant_id as unknown as string,
+      status: row.status as unknown as string,
+      kwargs: row.kwargs as any,
+      metadata: row.metadata as any,
+      graph_id: row.graph_id as unknown as string,
+      config: row.assistant_config as any,
+      attempt: row.attempt as number,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     } as Run;
   }
 

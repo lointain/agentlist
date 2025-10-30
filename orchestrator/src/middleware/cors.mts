@@ -1,6 +1,9 @@
-import { MiddlewareHandler } from "hono";
+// CORS 中间件封装
+// 说明：从原来的 http/middleware.mts 拆分到独立文件，保留行为一致
+import type { MiddlewareHandler } from "hono";
 import { cors as honoCors } from "hono/cors";
 
+// 导出与原始函数同名的 cors 工具，保持 API 不变
 export const cors = (
   cors:
     | {
@@ -14,6 +17,7 @@ export const cors = (
       }
     | undefined
 ): MiddlewareHandler => {
+  // 没有配置时，走默认开放策略
   if (cors == null) {
     return honoCors({
       origin: "*",
@@ -21,21 +25,22 @@ export const cors = (
     });
   }
 
+  // 可选正则匹配 origin
   const originRegex = cors.allow_origin_regex
     ? new RegExp(cors.allow_origin_regex)
     : undefined;
 
   const origin = originRegex
     ? (origin: string) => {
-        originRegex.lastIndex = 0; // reset regex in case it's a global regex
+        originRegex.lastIndex = 0;
         if (originRegex.test(origin)) return origin;
         return undefined;
       }
     : cors.allow_origins;
 
+  // 补齐建议暴露的头部，保持与平台一致
   if (cors.expose_headers?.length) {
     const headersSet = new Set(cors.expose_headers.map((h) => h.toLowerCase()));
-
     if (!headersSet.has("content-location")) {
       console.warn(
         "Adding missing `Content-Location` header in `cors.expose_headers`."
@@ -55,26 +60,7 @@ export const cors = (
   if (cors.allow_methods != null) config.allowMethods = cors.allow_methods;
   if (cors.allow_headers != null) config.allowHeaders = cors.allow_headers;
   if (cors.expose_headers != null) config.exposeHeaders = cors.expose_headers;
-  if (cors.allow_credentials != null) {
-    config.credentials = cors.allow_credentials;
-  }
+  if (cors.allow_credentials != null) config.credentials = cors.allow_credentials;
 
   return honoCors(config);
-};
-
-// This is used to match the behavior of the original LangGraph API
-// where the content-type is not being validated. Might be nice
-// to warn about this in the future and throw an error instead.
-export const ensureContentType = (): MiddlewareHandler => {
-  return async (c, next) => {
-    if (
-      c.req.header("content-type")?.startsWith("text/plain") &&
-      c.req.method !== "GET" &&
-      c.req.method !== "OPTIONS"
-    ) {
-      c.req.raw.headers.set("content-type", "application/json");
-    }
-
-    await next();
-  };
 };

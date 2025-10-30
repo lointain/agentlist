@@ -2,19 +2,19 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 
 import { v4 as uuid } from "uuid";
-import { z } from "zod/v3";
+import { z } from "zod";
 
 import {
   getAssistantId,
   getCachedStaticGraphSchema,
   getGraph,
-} from "../graph/load.mjs";
-import { getRuntimeGraphSchema } from "../graph/parser/index.mjs";
+} from "../graph/load.mts";
+import { getRuntimeGraphSchema } from "../graph/parser/index.mts";
 
 import { HTTPException } from "hono/http-exception";
-import * as schemas from "../schemas.mjs";
-import { assistants } from "../storage/context.mjs";
-import { AssistantSelectField } from "../storage/types.mjs";
+import * as schemas from "../schemas.mts";
+import { assistants } from "../storage/context.mts";
+import { AssistantSelectField } from "../storage/types.mts";
 const api = new Hono();
 
 const RunnableConfigSchema = z.object({

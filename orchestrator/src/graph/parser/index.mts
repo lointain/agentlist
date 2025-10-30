@@ -47,7 +47,7 @@ export async function getStaticGraphSchema(
     specs: GraphSpec[]
   ): Promise<GraphSchemaWithSubgraphs[]> {
     if (options?.mainThread) {
-      const { SubgraphExtractor } = await import("./parser.mjs");
+      const { SubgraphExtractor } = await import("./parser.mts");
       return SubgraphExtractor.extractSchemas(specs, { strict: false });
     }
 

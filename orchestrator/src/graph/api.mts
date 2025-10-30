@@ -5,3 +5,4 @@ export {
   getGraph,
   getGraphKeys,
 } from "./load.mjs";
+} from "./load.mts";

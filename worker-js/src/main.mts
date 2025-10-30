@@ -9,10 +9,13 @@ import { z } from "zod";
 import dotenv from "dotenv";
 import { v4 as uuidv4 } from "uuid";
 import winston from "winston";
+import { Pool } from "pg";
 
 // 导入 LangGraph 相关
-import { CompiledGraph } from "@langchain/langgraph";
-import { MemorySaver } from "@langchain/langgraph-checkpoint";
+// 注意：LangGraph 的 CompiledGraph 泛型签名复杂，为兼容不同版本，这里使用宽松类型
+type GraphInstance = any; // 已编译图实例（包含 stream 等方法）
+// 引入 Worker 侧图加载逻辑：支持路径+导出符语法与缓存
+import { getGraph as getWorkerGraph, registerFromEnv as registerGraphsFromEnv } from "./graph/load.mts";
 
 // 加载环境变量
 dotenv.config();
@@ -57,10 +60,15 @@ interface RunContext {
   runId: string;
   threadId: string;
   graphId: string;
-  graph: CompiledGraph;
+  graph: GraphInstance; // 已编译图实例
   abortController: AbortController;
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   startTime: number;
+  // 事件缓冲与 SSE 连接集合（用于实时推送与历史回放）
+  events: Array<{ event: string; data: any; timestamp: number }>; // 简单内存缓冲
+  sseControllers: Set<ReadableStreamDefaultController>;
+  // 步骤索引（用于写入数据库检查点）
+  stepIndex: number;
 }
 
 interface WorkerConfig {
@@ -80,12 +88,20 @@ export class AgentListWorker {
   private app: Hono;
   private config: WorkerConfig;
   private runningTasks = new Map<string, RunContext>();
-  private graphs = new Map<string, CompiledGraph>();
+  private graphs = new Map<string, GraphInstance>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  // Postgres 连接池：用于写入检查点
+  private pool: Pool;
 
   constructor(config: WorkerConfig) {
     this.config = config;
     this.app = new Hono();
+    // 初始化 Postgres 连接池（基于环境变量 DATABASE_URL）
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      logger.warn('DATABASE_URL 未配置，Worker 将无法写入检查点。');
+    }
+    this.pool = new Pool({ connectionString: databaseUrl, max: 10 });
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -108,7 +124,8 @@ export class AgentListWorker {
       c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       
       if (c.req.method === 'OPTIONS') {
-        return c.text('', 204);
+        // 返回 204 无内容以满足 CORS 预检请求
+        return new Response(null, { status: 204 });
       }
       
       await next();
@@ -173,6 +190,9 @@ export class AgentListWorker {
           abortController: new AbortController(),
           status: 'running',
           startTime: Date.now(),
+          events: [],
+          sseControllers: new Set(),
+          stepIndex: 0,
         };
 
         this.runningTasks.set(request.runId, runContext);
@@ -289,19 +309,18 @@ export class AgentListWorker {
     });
   }
 
-  private async getGraph(graphId: string): Promise<CompiledGraph | null> {
+  private async getGraph(graphId: string, config?: any): Promise<GraphInstance | null> {
     // 如果已缓存，直接返回
     if (this.graphs.has(graphId)) {
       return this.graphs.get(graphId)!;
     }
 
     try {
-      // 动态加载图（这里需要根据实际情况实现）
-      // 可以从文件系统、数据库或其他来源加载图定义
-      const graph = await this.loadGraphFromSource(graphId);
+      // 使用统一的解析器加载图（支持路径+导出符语法）
+      const graph = await getWorkerGraph(graphId, config, { cwd: process.cwd() });
       
       if (graph) {
-        this.graphs.set(graphId, graph);
+        this.graphs.set(graphId, graph as GraphInstance);
       }
       
       return graph;
@@ -311,25 +330,7 @@ export class AgentListWorker {
     }
   }
 
-  private async loadGraphFromSource(graphId: string): Promise<CompiledGraph | null> {
-    // 这里是示例实现，实际应该根据 graphId 加载对应的图
-    // 可以从配置文件、数据库或动态编译源码
-    
-    try {
-      // 示例：尝试从 graphs 目录加载
-      const graphPath = `./graphs/${graphId}.mjs`;
-      const graphModule = await import(graphPath);
-      
-      if (graphModule.default && typeof graphModule.default.compile === 'function') {
-        return graphModule.default.compile();
-      }
-      
-      return null;
-    } catch (error) {
-      logger.warn(`Could not load graph from ${graphId}:`, error);
-      return null;
-    }
-  }
+  // 旧的 loadGraphFromSource 已由统一的解析器替代
 
   private async executeGraph(runContext: RunContext, request: StartRunRequest): Promise<void> {
     const { runId, graph, abortController } = runContext;
@@ -337,8 +338,20 @@ export class AgentListWorker {
     try {
       logger.info(`Starting graph execution for run ${runId}`);
       
-      // 配置检查点保存器（这里使用内存，实际可以连接到共享存储）
-      const checkpointer = new MemorySaver();
+      // 检查点由我们在 worker 侧写入 Postgres，不再使用内存版 MemorySaver
+      // 尝试恢复：当同一 runId 存在检查点时，回放最近 values 作为初始输入
+      let startingInputs = request.inputs;
+      try {
+        const last = await this.readLastCheckpoint(request.runId);
+        if (last && last.data && last.data.values !== undefined) {
+          startingInputs = last.data.values;
+          runContext.stepIndex = (last.step_index ?? 0) + 1;
+          this.emitEvent(runContext, 'resume', { stepIndex: runContext.stepIndex });
+          logger.info(`Resuming run ${runId} from step ${runContext.stepIndex}`);
+        }
+      } catch (err) {
+        logger.warn(`读取最近检查点失败，按新运行执行 run=${runId}:`, err);
+      }
       
       // 配置运行参数
       const config = {
@@ -352,7 +365,7 @@ export class AgentListWorker {
       };
 
       // 执行图并流式输出结果
-      const stream = await graph.stream(request.inputs, config);
+      const stream = await graph.stream(startingInputs, config);
       
       for await (const chunk of stream) {
         // 检查是否被取消
@@ -363,6 +376,16 @@ export class AgentListWorker {
 
         // 发送中间结果事件
         this.emitEvent(runContext, 'values', chunk);
+        // 写入检查点到 Postgres（基于当前步索引）
+        try {
+          await this.writeCheckpoint(runContext, runContext.stepIndex, {
+            values: chunk,
+            metadata: request.metadata ?? {},
+          });
+          runContext.stepIndex += 1;
+        } catch (err) {
+          logger.error(`写入检查点失败 run=${runId} step=${runContext.stepIndex}:`, err);
+        }
       }
 
       if (runContext.status === 'running') {
@@ -394,38 +417,125 @@ export class AgentListWorker {
   }
 
   private emitEvent(runContext: RunContext, event: string, data: any): void {
-    // 这里可以实现事件发送逻辑
-    // 在实际实现中，可能需要将事件存储到队列中，供 SSE 流消费
-    logger.debug(`Event for run ${runContext.runId}: ${event}`, data);
+    // 将事件写入内存缓冲，并推送给所有 SSE 订阅者
+    const payload = { event, data, timestamp: Date.now() };
+    runContext.events.push(payload);
+    const line = `data: ${JSON.stringify(payload)}\n\n`;
+    const bytes = new TextEncoder().encode(line);
+    for (const ctrl of runContext.sseControllers) {
+      try {
+        ctrl.enqueue(bytes);
+      } catch (err) {
+        // 某些连接可能已关闭，忽略错误
+      }
+    }
+    // 将事件持久化到 events 表，便于历史回放与调试
+    this.writeEvent(runContext.runId, event, data).catch((err) => {
+      logger.warn(`写入事件失败 run=${runContext.runId} type=${event}:`, err);
+    });
+    logger.debug(`Event for run ${runContext.runId}: ${event}`);
   }
 
   private streamRunEvents(runContext: RunContext, controller: ReadableStreamDefaultController): void {
-    // 实现 SSE 事件流
-    // 这里是简化版本，实际需要更复杂的事件管理
-    
-    const sendEvent = (event: string, data: any) => {
-      const sseData = `data: ${JSON.stringify({ event, data, timestamp: Date.now() })}\n\n`;
-      controller.enqueue(new TextEncoder().encode(sseData));
-    };
+    // 将 controller 注册入集合，并回放历史事件
+    runContext.sseControllers.add(controller);
 
-    // 发送初始状态
-    sendEvent('start', { runId: runContext.runId, status: runContext.status });
+    // 先发送启动事件
+    const startPayload = { event: 'start', data: { runId: runContext.runId, status: runContext.status }, timestamp: Date.now() };
+    controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(startPayload)}\n\n`));
+    // 持久化 start 事件
+    this.writeEvent(runContext.runId, 'start', startPayload.data).catch(() => {});
 
-    // 监听状态变化（这里需要实现更完善的事件系统）
-    const checkStatus = () => {
-      if (runContext.status === 'completed') {
-        sendEvent('done', { runId: runContext.runId });
-        controller.close();
-      } else if (runContext.status === 'failed' || runContext.status === 'cancelled') {
-        sendEvent('error', { runId: runContext.runId, status: runContext.status });
-        controller.close();
-      } else {
-        // 继续检查
-        setTimeout(checkStatus, 1000);
+    // 回放历史事件
+    // 优先从数据库回放（支持 Worker 重启后的历史流），如果失败则退回内存缓冲
+    (async () => {
+      try {
+        const persisted = await this.readEvents(runContext.runId);
+        for (const evt of persisted) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(evt)}\n\n`));
+        }
+      } catch {
+        for (const evt of runContext.events) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(evt)}\n\n`));
+        }
       }
+    })();
+
+    // 注册关闭钩子：连接关闭时移除 controller
+    const cleanup = () => {
+      runContext.sseControllers.delete(controller);
+    };
+    // 简化：由调用方关闭时触发 finally
+    // 状态完成/失败/取消时关闭所有连接
+    const checkEnd = () => {
+      if (runContext.status === 'completed') {
+        const line = `data: ${JSON.stringify({ event: 'done', data: { runId: runContext.runId }, timestamp: Date.now() })}\n\n`;
+        controller.enqueue(new TextEncoder().encode(line));
+        controller.close();
+        cleanup();
+        return true;
+      }
+      if (runContext.status === 'failed' || runContext.status === 'cancelled') {
+        const line = `data: ${JSON.stringify({ event: 'error', data: { runId: runContext.runId, status: runContext.status }, timestamp: Date.now() })}\n\n`;
+        controller.enqueue(new TextEncoder().encode(line));
+        controller.close();
+        cleanup();
+        return true;
+      }
+      return false;
     };
 
-    checkStatus();
+    // 周期检查，用于被动关闭（SSE 客户端不一定发关闭信号）
+    const interval = setInterval(() => {
+      if (checkEnd()) {
+        clearInterval(interval);
+      }
+    }, 1000);
+  }
+
+  // 将检查点写入 Postgres：每个 values 事件作为一个 step
+  private async writeCheckpoint(runContext: RunContext, stepIndex: number, data: any): Promise<void> {
+    if (!this.pool) return;
+    const checkpointId = uuidv4();
+    await this.pool.query(
+      `INSERT INTO checkpoints (checkpoint_id, thread_id, run_id, step_index, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+      [checkpointId, runContext.threadId, runContext.runId, stepIndex, JSON.stringify(data)]
+    );
+  }
+
+  // 从 Postgres 读取最近检查点（用于断点续跑）
+  private async readLastCheckpoint(runId: string): Promise<{ step_index: number; data: any } | null> {
+    if (!this.pool) return null;
+    const res = await this.pool.query(
+      `SELECT step_index, data FROM checkpoints WHERE run_id = $1 ORDER BY step_index DESC LIMIT 1`,
+      [runId]
+    );
+    if (res && typeof res.rowCount === 'number' && res.rowCount > 0) {
+      const row = res.rows[0];
+      return { step_index: Number(row.step_index), data: row.data };
+    }
+    return null;
+  }
+
+  // 将事件写入 Postgres 的 events 表（SSE 持久化）
+  private async writeEvent(runId: string, type: string, data: any): Promise<void> {
+    if (!this.pool) return;
+    const eventId = uuidv4();
+    await this.pool.query(
+      `INSERT INTO events (event_id, run_id, type, data, created_at) VALUES ($1, $2, $3, $4, NOW())`,
+      [eventId, runId, type, JSON.stringify(data)]
+    );
+  }
+
+  // 读取某个 run 的历史事件（按时间顺序）
+  private async readEvents(runId: string): Promise<Array<{ event: string; data: any; timestamp: number }>> {
+    if (!this.pool) return [];
+    const res = await this.pool.query(
+      `SELECT type AS event, data, extract(epoch from created_at)*1000 AS timestamp FROM events WHERE run_id = $1 ORDER BY created_at ASC`,
+      [runId]
+    );
+    return res.rows.map((r) => ({ event: r.event, data: r.data, timestamp: Number(r.timestamp) }));
   }
 
   private async registerWithOrchestrator(): Promise<void> {
@@ -492,6 +602,19 @@ export class AgentListWorker {
     // 注册到协调器
     await this.registerWithOrchestrator();
     
+    // 在 Worker 启动时支持从环境变量预注册图
+    // 约定：WORKER_GRAPHS 为 JSON，形如 { "graphA": "./graphs/graphA.mjs", "graphB": "./graphs/graphB.mjs:build" }
+    try {
+      const raw = process.env.WORKER_GRAPHS;
+      if (raw) {
+        const specs = JSON.parse(raw) as Record<string, string>;
+        await registerGraphsFromEnv(specs, { cwd: process.cwd() });
+        logger.info(`Registered graphs from env: ${Object.keys(specs).join(', ')}`);
+      }
+    } catch (err) {
+      logger.warn('Failed to register graphs from WORKER_GRAPHS:', err);
+    }
+
     // 启动心跳
     this.startHeartbeat();
     
@@ -507,7 +630,7 @@ export class AgentListWorker {
     logger.info(`Max Concurrency: ${this.config.maxConcurrency}`);
     logger.info(`Capabilities: ${this.config.capabilities.graphs.join(', ')}`);
     
-    return server;
+    // 注意：start() 不返回 server，保持签名为 Promise<void>
   }
 
   async stop(): Promise<void> {
@@ -516,6 +639,12 @@ export class AgentListWorker {
     // 取消所有运行中的任务
     for (const runContext of this.runningTasks.values()) {
       runContext.abortController.abort('shutdown');
+    }
+    // 关闭数据库连接
+    try {
+      await this.pool.end();
+    } catch (err) {
+      logger.warn('关闭数据库连接失败:', err);
     }
     
     logger.info('AgentList JS Worker stopped');

@@ -3,19 +3,19 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { streamSSE } from "hono/streaming";
 import { v4 as uuid4 } from "uuid";
-import { z } from "zod/v3";
-import type { AuthContext } from "../auth/index.mjs";
-import { getAssistantId } from "../graph/load.mjs";
-import { logError, logger } from "../logging.mjs";
-import * as schemas from "../schemas.mjs";
-import { runs, threads } from "../storage/context.mjs";
-import type { Run, RunKwargs } from "../storage/types.mjs";
+import { z } from "zod";
+import type { AuthContext } from "../auth/types.mts";
+import { getAssistantId } from "../graph/load.mts";
+import { logError, logger } from "../logging.mts";
+import * as schemas from "../schemas.mts";
+import { runs, threads } from "../storage/context.mts";
+import type { Run, RunKwargs } from "../storage/types.mts";
 import {
   getDisconnectAbortSignal,
   jsonExtra,
   waitKeepAlive,
-} from "../utils/hono.mjs";
-import { serialiseAsDict } from "../utils/serde.mjs";
+} from "../utils/hono.mts";
+import { serialiseAsDict } from "../utils/serde.mts";
 
 const api = new Hono();
 
