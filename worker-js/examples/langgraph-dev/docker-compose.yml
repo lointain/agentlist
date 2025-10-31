@@ -1,45 +1,86 @@
-version: '3.8'
+version: "3.8"
 
 services:
+  # PostgreSQL 数据库（可选，但worker可能需要）
+  postgres:
+    image: postgres:16
+    container_name: langgraph-dev-postgres
+    environment:
+      POSTGRES_DB: agentlist
+      POSTGRES_USER: agentlist
+      POSTGRES_PASSWORD: agentlist123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - langgraph-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentlist -d agentlist"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis（可选，但worker可能需要）
+  redis:
+    image: redis:7-alpine
+    container_name: langgraph-dev-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - langgraph-dev-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # LangGraph Worker
   worker-js:
-    build: .
+    build:
+      context: ../../..
+      dockerfile: worker-js/examples/langgraph-dev/Dockerfile
+    container_name: langgraph-dev-worker
     ports:
       - "3001:3001"
-    environment:
-      # 服务器URL配置，如果需要连接到server组件
-      - SERVER_URL=http://server:3000
-      
-      # Worker配置
-      - WORKER_ID=worker-js-langgraph-dev
-      - HOST=0.0.0.0
-      - PORT=3001
-      
-      # 日志级别
-      - LOG_LEVEL=info
-      
-      # 从langgraph.json加载图的配置
-      - LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/graphs/langgraph-dev/index.ts:graph"}}
-      
-      # 数据库连接（可选，如果需要使用检查点功能）
-      # - DATABASE_URL=postgresql://user:password@db:5432/agentlist
-      
-      # 心跳间隔（毫秒）
-      - HEARTBEAT_INTERVAL=30000
+    # 从.env文件加载环境变量
+    env_file:
+      - .env
     volumes:
-      # 如果需要动态更新图代码，可以挂载卷
+      # 挂载.env文件，便于动态修改
+      - ./.env:/app/.env
+      # 挂载langgraph.json配置文件，便于动态修改图配置
+      - ./.langgraph.json:/app/langgraph.json:ro
+      # 可选：挂载代码以支持热重载开发
       # - ./:/app/graphs/langgraph-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - langgraph-dev-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })",
+        ]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 5s
 
-  # 可选：如果需要连接到server组件，可以在这里定义
-  # server:
-  #   image: agentlist-server:latest
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - ...
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  langgraph-dev-network:
+    driver: bridge

@@ -15,7 +15,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 interface LanggraphJson {
-  graphs?: Record<string, string | { path: string; export?: string; lang?: string }>;
+  graphs?: Record<
+    string,
+    string | { path: string; export?: string; lang?: string }
+  >;
   env?: Record<string, string>;
   dependencies?: Record<string, unknown>;
 }
@@ -24,7 +27,10 @@ interface LanggraphJson {
  * 解析 langgraph.json 并生成 worker-js 可识别的图规范映射。
  * 输出形如：{ graphId: "relativePath[:exportSymbol]" }
  */
-export function parseLanggraphJson(configPath: string): { specs: Record<string, string>; baseDir: string } {
+export function parseLanggraphJson(configPath: string): {
+  specs: Record<string, string>;
+  baseDir: string;
+} {
   const abs = path.resolve(configPath);
   if (!fs.existsSync(abs)) {
     throw new Error(`langgraph.json 未找到：${abs}`);
@@ -52,7 +58,13 @@ export function parseLanggraphJson(configPath: string): { specs: Record<string, 
     }
 
     // 仅处理 JS/未指定语言的条目
-    if (lang && lang.toLowerCase() !== "js" && lang.toLowerCase() !== "javascript" && lang.toLowerCase() !== "ts" && lang.toLowerCase() !== "typescript") {
+    if (
+      lang &&
+      lang.toLowerCase() !== "js" &&
+      lang.toLowerCase() !== "javascript" &&
+      lang.toLowerCase() !== "ts" &&
+      lang.toLowerCase() !== "typescript"
+    ) {
       continue;
     }
 
@@ -66,7 +78,10 @@ export function parseLanggraphJson(configPath: string): { specs: Record<string, 
 /**
  * 尝试读取默认路径的 langgraph.json（当前工作目录），若存在则返回映射；否则返回 null。
  */
-export function tryParseDefaultLanggraphJson(): { specs: Record<string, string>; baseDir: string } | null {
+export function tryParseDefaultLanggraphJson(): {
+  specs: Record<string, string>;
+  baseDir: string;
+} | null {
   const defaultPath = path.join(process.cwd(), "langgraph.json");
   if (!fs.existsSync(defaultPath)) return null;
   return parseLanggraphJson(defaultPath);

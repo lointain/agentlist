@@ -2,14 +2,19 @@
 // 说明：将注册协调器与心跳逻辑从 main.mts 抽离为可复用函数
 // 这样 main.mts 聚焦路由与装配，生命周期细节统一在此维护。
 
-import type { RuntimeDeps, WorkerConfig } from "./types.mts";
+import type { WorkerConfig } from "./types.js";
+import type { Logger } from "winston";
+import type { RuntimeDeps } from "./types.js";
 
 /**
  * 注册当前 Worker 到 Server。
  * - 兼容 body.url 与 body.endpointUrl 两种字段（协调器端已兼容）。
  * - 仅在配置了 serverUrl 时生效。
  */
-export async function registerWithOrchestrator(config: WorkerConfig, deps: RuntimeDeps): Promise<void> {
+export async function registerWithOrchestrator(
+  config: WorkerConfig,
+  deps: RuntimeDeps
+): Promise<void> {
   const { logger } = deps;
   if (!config.serverUrl) {
     logger.info("No server URL configured, skipping registration");
@@ -47,14 +52,20 @@ export async function registerWithOrchestrator(config: WorkerConfig, deps: Runti
  * - 周期性向 /workers/:workerId/heartbeat 发送 POST 请求。
  * - 返回计时器句柄，便于后续停止。
  */
-export function startHeartbeat(config: WorkerConfig, deps: RuntimeDeps): NodeJS.Timeout | null {
+export function startHeartbeat(
+  config: WorkerConfig,
+  deps: RuntimeDeps
+): NodeJS.Timeout | null {
   const { logger } = deps;
   if (!config.serverUrl) {
     return null;
   }
   const timer = setInterval(async () => {
     try {
-      const response = await fetch(`${config.serverUrl}/workers/${config.workerId}/heartbeat`, { method: "POST" });
+      const response = await fetch(
+        `${config.serverUrl}/workers/${config.workerId}/heartbeat`,
+        { method: "POST" }
+      );
       if (!response.ok) {
         logger.warn(`Heartbeat failed: ${response.statusText}`);
       }

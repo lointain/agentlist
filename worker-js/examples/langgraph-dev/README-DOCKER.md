@@ -19,12 +19,14 @@
 在 `docker-compose.yml` 中，您可以配置以下关键参数：
 
 - **SERVER_URL**: 配置 worker 连接到的服务器地址，例如 `http://server:3000`
+
   - 如需独立运行（不连接服务器），可以将其注释或留空
   - 如需连接到外部服务器，请修改为实际的服务器地址
 
 - **WORKER_ID**: Worker 实例的唯一标识符
 
 - **LANGGRAPH_CONFIG**: 指定要加载的图配置
+
   - 默认已配置为加载当前目录下的示例图: `{"graphs":{"examples-echo":"/app/graphs/langgraph-dev/index.ts:graph"}}`
 
 - **其他可选配置**:

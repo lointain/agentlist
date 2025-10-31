@@ -1,16 +1,22 @@
 // Execution 运行时模块
 // 说明：封装图执行流程，包括检查点恢复、流式 events、检查点写入与状态管理
 
-import type { RunContext } from "./types.mts";
-import type { RuntimeDeps } from "./types.mts";
-import { emitEvent } from "./events.mts";
-import { writeCheckpoint, readLastCheckpoint } from "./checkpoints.mts";
+import type { RunContext } from "./types.js";
+import type { RuntimeDeps } from "./types.js";
+import { emitEvent } from "./events.js";
+import { writeCheckpoint, readLastCheckpoint } from "./checkpoints.js";
 
 // 执行图并进行流式事件输出与检查点持久化
 export async function executeGraph(
   deps: RuntimeDeps,
   runContext: RunContext,
-  request: { inputs?: any; metadata?: Record<string, any>; config?: any; threadId: string; runId: string }
+  request: {
+    inputs?: any;
+    metadata?: Record<string, any>;
+    config?: any;
+    threadId: string;
+    runId: string;
+  }
 ): Promise<void> {
   const { runId, graph, abortController } = runContext;
   const { logger } = deps;
@@ -26,7 +32,9 @@ export async function executeGraph(
       if (last && last.data && last.data.values !== undefined) {
         startingInputs = last.data.values;
         runContext.stepIndex = (last.step_index ?? 0) + 1;
-        emitEvent(deps, runContext, "resume", { stepIndex: runContext.stepIndex });
+        emitEvent(deps, runContext, "resume", {
+          stepIndex: runContext.stepIndex,
+        });
         logger.info(`Resuming run ${runId} from step ${runContext.stepIndex}`);
       }
     } catch (err) {
@@ -64,7 +72,10 @@ export async function executeGraph(
         });
         runContext.stepIndex += 1;
       } catch (err) {
-        logger.error(`写入检查点失败 run=${runId} step=${runContext.stepIndex}:`, err);
+        logger.error(
+          `写入检查点失败 run=${runId} step=${runContext.stepIndex}:`,
+          err
+        );
       }
     }
 

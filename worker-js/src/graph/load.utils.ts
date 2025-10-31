@@ -1,5 +1,5 @@
 // Worker 侧图解析与编译工具
-// 目标：参考 server/src/graph/load.utils.mts，在 Worker 内实现图解析/编译
+// 目标：参考 server/src/graph/load.utils，在 Worker 内实现图解析/编译
 // 支持 "path[:exportSymbol]" 语法，默认导出为 default
 
 import { pathToFileURL } from "node:url";
@@ -21,7 +21,15 @@ function isGraph(obj: any): boolean {
 export async function resolveGraph(
   spec: string,
   options: { cwd: string }
-): Promise<{ resolved: GraphInstance | ((config: any) => Promise<GraphInstance> | GraphInstance); sourceFile: string; exportSymbol?: string } & Record<string, any>> {
+): Promise<
+  {
+    resolved:
+      | GraphInstance
+      | ((config: any) => Promise<GraphInstance> | GraphInstance);
+    sourceFile: string;
+    exportSymbol?: string;
+  } & Record<string, any>
+> {
   // 解析 "path[:exportSymbol]" 形式
   const [userFile, exportSymbol] = spec.split(":", 2);
   const sourceFile = path.resolve(options.cwd, userFile);
@@ -56,5 +64,7 @@ export async function resolveGraph(
     return { sourceFile, exportSymbol, resolved: exported };
   }
 
-  throw new Error(`无法解析图：${spec}，请检查导出是否为 Graph/工厂函数/已编译图`);
+  throw new Error(
+    `无法解析图：${spec}，请检查导出是否为 Graph/工厂函数/已编译图`
+  );
 }

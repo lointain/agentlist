@@ -1,9 +1,8 @@
 // Worker 运行时类型定义模块
 // 说明：将原 main.mts 中的运行时相关类型抽取为独立文件，便于跨模块复用
 
-import type { Pool } from "pg";
-import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Logger } from "winston";
+import type { Pool } from "pg";
 
 // 宽松类型以兼容不同版本的 LangGraph 泛型签名
 export type GraphInstance = any;
@@ -38,7 +37,6 @@ export interface RunContext {
 
 // 依赖注入：供 runtime 模块访问数据库与日志
 export interface RuntimeDeps {
-  pool?: Pool;
-  db?: NodePgDatabase;
   logger: Logger;
+  pool: Pool;
 }

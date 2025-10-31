@@ -1,9 +1,6 @@
 # 基于worker-js的Dockerfile，用于运行langgraph-dev项目
 FROM node:18-alpine
 
-# 设置工作目录
-WORKDIR /app
-
 # 安装系统依赖
 RUN apk add --no-cache \
     python3 \
@@ -11,21 +8,46 @@ RUN apk add --no-cache \
     g++ \
     && rm -rf /var/cache/apk/*
 
-# 复制worker-js的package.json和package-lock.json
-COPY ../../package*.json ./
+# 设置工作目录
+WORKDIR /app
 
-# 安装Node.js依赖
+# 复制worker-js和share目录（本地开发环境）
+COPY ./worker-js ./worker-js
+COPY ./share ./share
+
+# 安装worker-js的Node.js依赖
+WORKDIR /app/worker-js
 RUN npm ci && npm cache clean --force
 
-# 复制worker-js源代码
-COPY ../../src ./src
-COPY ../../tsconfig.json ./
-
-# 复制langgraph-dev项目（假设它在外部文件夹中，这里模拟复制）
+# 创建图目录并复制langgraph-dev项目
+RUN mkdir -p /app/graphs/langgraph-dev
 COPY . /app/graphs/langgraph-dev
 
-# 构建应用
-RUN npm run build
+# 安装langgraph-dev项目的依赖并编译
+WORKDIR /app/worker-js/graphs/langgraph-dev
+RUN npm install
+
+# 回到worker-js目录并构建应用
+WORKDIR /app/worker-js
+RUN echo "Current directory: $(pwd)" && ls -la
+# 查看TypeScript配置
+RUN cat tsconfig.json
+# 查看package.json中的构建脚本
+RUN cat package.json | grep -A 10 "scripts"
+# 检查源代码目录结构
+RUN find ./src -type f | sort
+# 注意：tsconfig.json设置了emitDeclarationOnly:true，需要使用其他方式构建
+# 修改tsconfig.json，允许生成JavaScript文件
+RUN sed -i 's/"emitDeclarationOnly": true/"emitDeclarationOnly": false/' tsconfig.json
+# 安装tsx用于开发运行
+RUN npm install -g tsx
+# 使用tsx直接运行源代码（开发模式）
+RUN echo "Using tsx to run source code directly in development mode"
+# 检查是否有其他可能的输出目录
+RUN find /app/worker-js -name "main.mjs" -o -name "main.js" || echo "Main file not found anywhere"
+
+# 安装bash（在创建非root用户前）
+RUN apk add --no-cache bash
 
 # 创建非root用户
 RUN addgroup -g 1001 -S nodejs && \
@@ -35,12 +57,24 @@ RUN addgroup -g 1001 -S nodejs && \
 RUN chown -R worker:nodejs /app
 USER worker
 
+# 确保.env文件存在（即使没挂载，也使用默认配置）
+WORKDIR /app
+RUN touch .env && \
+    echo "# 默认环境变量配置" > .env && \
+    echo "# 请确保在此文件中配置所有必要的环境变量" >> .env
+
+# 返回worker-js目录
+WORKDIR /app/worker-js
+
+# 设置默认的图配置环境变量
+ENV LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/graphs/langgraph-dev/dist/index.js:graph"}}
+
 # 暴露端口
 EXPOSE 3001
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
-
-# 启动应用（通过环境变量配置）
-CMD ["node", "dist/main.mjs"]
+# 启动应用（使用tsx直接运行TypeScript源代码）
+RUN echo "Final working directory: $(pwd)"
+CMD ["bash", "-c", "echo 'Starting worker with tsx...' && echo 'Current directory:' && pwd && echo 'Source files:' && ls -la ./src && tsx src/main.mts"]
