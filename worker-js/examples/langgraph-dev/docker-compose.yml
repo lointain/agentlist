@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  worker-js:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      # 服务器URL配置，如果需要连接到server组件
+      - SERVER_URL=http://server:3000
+      
+      # Worker配置
+      - WORKER_ID=worker-js-langgraph-dev
+      - HOST=0.0.0.0
+      - PORT=3001
+      
+      # 日志级别
+      - LOG_LEVEL=info
+      
+      # 从langgraph.json加载图的配置
+      - LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/graphs/langgraph-dev/index.ts:graph"}}
+      
+      # 数据库连接（可选，如果需要使用检查点功能）
+      # - DATABASE_URL=postgresql://user:password@db:5432/agentlist
+      
+      # 心跳间隔（毫秒）
+      - HEARTBEAT_INTERVAL=30000
+    volumes:
+      # 如果需要动态更新图代码，可以挂载卷
+      # - ./:/app/graphs/langgraph-dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # 可选：如果需要连接到server组件，可以在这里定义
+  # server:
+  #   image: agentlist-server:latest
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - ...
