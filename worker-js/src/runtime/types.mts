@@ -13,7 +13,7 @@ export interface WorkerConfig {
   port: number;
   host: string;
   workerId: string;
-  orchestratorUrl?: string;
+  serverUrl?: string;
   maxConcurrency: number;
   heartbeatInterval: number;
   capabilities: {

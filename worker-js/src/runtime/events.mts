@@ -2,7 +2,7 @@
 // 说明：负责事件发射/持久化与 SSE 历史转发，从 main.mts 中拆出以便复用与维护
 
 import type { RuntimeDeps, RunContext } from "./types.mts";
-import { events } from "../../../packages/shared-schema/src/index.mts";
+import { events } from "../../../share/shared-schema/src/index.mts";
 import { desc, eq } from "drizzle-orm";
 
 // 写事件到 Postgres 的 events 表（保持与 main.mts 相同的列名与语义）

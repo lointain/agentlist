@@ -2,7 +2,7 @@
 // 说明：负责检查点的读写（Postgres），从 main.mts 中拆出以便复用与维护
 
 import type { RuntimeDeps, RunContext } from "./types.mts";
-import { checkpoints } from "../../../packages/shared-schema/src/index.mts";
+import { checkpoints } from "../../../share/shared-schema/src/index.mts";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { desc, eq } from "drizzle-orm";
 

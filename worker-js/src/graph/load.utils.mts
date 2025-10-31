@@ -1,5 +1,5 @@
 // Worker 侧图解析与编译工具
-// 目标：参考 orchestrator/src/graph/load.utils.mts，在 Worker 内实现图解析/编译
+// 目标：参考 server/src/graph/load.utils.mts，在 Worker 内实现图解析/编译
 // 支持 "path[:exportSymbol]" 语法，默认导出为 default
 
 import { pathToFileURL } from "node:url";

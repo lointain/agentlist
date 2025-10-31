@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@agentlist/shared-schema": ["./share/shared-schema/src/index.mts"]
+    }
+  }
+}

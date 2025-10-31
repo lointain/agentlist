@@ -18,7 +18,7 @@ import { GraphInstance, RunContext, WorkerConfig } from "./runtime/types.mts";
 import { writeCheckpoint as rtWriteCheckpoint, readLastCheckpoint as rtReadLastCheckpoint } from "./runtime/checkpoints.mts";
 import { emitEvent as rtEmitEvent, streamRunEvents as rtStreamRunEvents, writeEvent as rtWriteEvent, readEvents as rtReadEvents } from "./runtime/events.mts";
 import { executeGraph as rtExecuteGraph } from "./runtime/execution.mts";
-import { registerWithOrchestrator as rtRegisterWithOrchestrator, startHeartbeat as rtStartHeartbeat, stopHeartbeat as rtStopHeartbeat } from "./runtime/lifecycle.mts";
+import { registerWithOrchestrator as rtRegisterWithServer, startHeartbeat as rtStartHeartbeat, stopHeartbeat as rtStopHeartbeat } from "./runtime/lifecycle.mts";
 
 // 导入 LangGraph 相关
 // 引入 Worker 侧图加载逻辑：支持路径+导出符语法与缓存
@@ -368,7 +368,7 @@ export class AgentListWorker {
 
   async start(): Promise<void> {
     // 注册到协调器
-    await rtRegisterWithOrchestrator(this.config, { pool: this.pool, logger });
+    await rtRegisterWithServer(this.config, { pool: this.pool, logger });
     
     // 优先尝试基于标准 langgraph.json 注册图（符合 langgraphjs 项目结构）
     try {
@@ -445,7 +445,7 @@ export async function startWorker(config?: Partial<WorkerConfig>): Promise<Agent
     port: parseInt(process.env.WORKER_PORT || '3001'),
     host: process.env.WORKER_HOST || '0.0.0.0',
     workerId: process.env.WORKER_ID || `js-worker-${uuidv4()}`,
-    orchestratorUrl: process.env.ORCHESTRATOR_URL,
+    serverUrl: process.env.SERVER_URL,
     maxConcurrency: parseInt(process.env.MAX_CONCURRENCY || '10'),
     heartbeatInterval: parseInt(process.env.HEARTBEAT_INTERVAL || '30000'),
     capabilities: {

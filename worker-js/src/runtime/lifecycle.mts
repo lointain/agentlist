@@ -5,19 +5,19 @@
 import type { RuntimeDeps, WorkerConfig } from "./types.mts";
 
 /**
- * 注册当前 Worker 到 Orchestrator。
+ * 注册当前 Worker 到 Server。
  * - 兼容 body.url 与 body.endpointUrl 两种字段（协调器端已兼容）。
- * - 仅在配置了 orchestratorUrl 时生效。
+ * - 仅在配置了 serverUrl 时生效。
  */
 export async function registerWithOrchestrator(config: WorkerConfig, deps: RuntimeDeps): Promise<void> {
   const { logger } = deps;
-  if (!config.orchestratorUrl) {
-    logger.info("No orchestrator URL configured, skipping registration");
+  if (!config.serverUrl) {
+    logger.info("No server URL configured, skipping registration");
     return;
   }
 
   try {
-    const response = await fetch(`${config.orchestratorUrl}/workers/register`, {
+    const response = await fetch(`${config.serverUrl}/workers/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -33,28 +33,28 @@ export async function registerWithOrchestrator(config: WorkerConfig, deps: Runti
     });
 
     if (response.ok) {
-      logger.info(`Successfully registered with orchestrator: ${config.orchestratorUrl}`);
+      logger.info(`Successfully registered with server: ${config.serverUrl}`);
     } else {
-      logger.error(`Failed to register with orchestrator: ${response.statusText}`);
+      logger.error(`Failed to register with server: ${response.statusText}`);
     }
   } catch (error) {
-    logger.error("Error registering with orchestrator:", error);
+    logger.error("Error registering with server:", error);
   }
 }
 
 /**
- * 启动与 Orchestrator 的心跳。
+ * 启动与 Server 的心跳。
  * - 周期性向 /workers/:workerId/heartbeat 发送 POST 请求。
  * - 返回计时器句柄，便于后续停止。
  */
 export function startHeartbeat(config: WorkerConfig, deps: RuntimeDeps): NodeJS.Timeout | null {
   const { logger } = deps;
-  if (!config.orchestratorUrl) {
+  if (!config.serverUrl) {
     return null;
   }
   const timer = setInterval(async () => {
     try {
-      const response = await fetch(`${config.orchestratorUrl}/workers/${config.workerId}/heartbeat`, { method: "POST" });
+      const response = await fetch(`${config.serverUrl}/workers/${config.workerId}/heartbeat`, { method: "POST" });
       if (!response.ok) {
         logger.warn(`Heartbeat failed: ${response.statusText}`);
       }

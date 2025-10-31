@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────┐    HTTP/SSE     ┌──────────────────┐
-│   Orchestrator  │ ◄──────────────► │   Worker-JS      │
+│   Server        │ ◄──────────────► │   Worker-JS      │
 │   (协调器)       │                 │   (JS/TS Worker) │
 │                 │                 └──────────────────┘
 │  - API 管理     │    HTTP/SSE     ┌──────────────────┐
@@ -24,7 +24,7 @@
 
 ## 项目结构
 
-- **orchestrator/**: 协调器服务，基于 langgraph-api 改造
+- **server/**: 协调器服务，基于 langgraph-api 改造
   - 提供统一的 REST API 和 SSE 接口
   - 管理 Assistant、Thread、Run 的生命周期
   - 调度任务到不同语言的 Worker
@@ -68,7 +68,7 @@ docker-compose up -d postgres redis
 
 ### 2. 启动协调器
 ```bash
-cd orchestrator
+cd server
 npm install
 npm run dev
 ```
@@ -93,7 +93,7 @@ python main.py
 ## 开发指南
 
 详细的开发指南请参考各子项目的 README 文件：
-- [Orchestrator 开发指南](./orchestrator/README.md)
+- [Server 开发指南](./server/README.md)
 - [Worker-JS 开发指南](./worker-js/README.md)
 - [Worker-Python 开发指南](./worker-python/README.md)
 

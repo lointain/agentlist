@@ -1,5 +1,5 @@
 // Worker 侧图加载与缓存
-// 目标：参考 orchestrator/src/graph/load.mts，将图的注册/获取逻辑迁移到 Worker
+// 目标：参考 server/src/graph/load.mts，将图的注册/获取逻辑迁移到 Worker
 
 import { HTTPException } from "hono/http-exception";
 import { resolveGraph } from "./load.utils.mts";
