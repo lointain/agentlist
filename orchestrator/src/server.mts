@@ -246,3 +246,11 @@ export async function main(): Promise<void> {
   await server.start();
 }
 
+// 如果直接运行此文件，启动服务器
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(error => {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  });
+}
+
