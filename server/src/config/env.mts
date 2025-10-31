@@ -9,7 +9,7 @@ import { z } from "zod";
 
 // 环境变量 schema（保留与原 server.mts 一致的字段与默认值）
 export const EnvSchema = z.object({
-  PORT: z.string().default("8000"),
+  PORT: z.string().default("5050"),
   HOST: z.string().default("0.0.0.0"),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string(),
