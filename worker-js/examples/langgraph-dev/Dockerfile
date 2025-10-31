@@ -6,24 +6,21 @@ RUN apk add --no-cache \
     python3 \
     make \
     g++ \
+    git \
     && rm -rf /var/cache/apk/*
 
 # 设置工作目录
 WORKDIR /app
 
-# 复制worker-js目录
-COPY ./worker-js ./worker-js
+ARG GIT_REPO
+RUN git clone ${GIT_REPO} .
 
 # 安装worker-js的Node.js依赖
 WORKDIR /app/worker-js
 RUN npm ci && npm cache clean --force
 
-# 创建图目录并复制langgraph-dev项目
-RUN mkdir -p /app/graphs/langgraph-dev
-COPY . /app/graphs/langgraph-dev
-
 # 安装langgraph-dev项目的依赖
-WORKDIR /app/worker-js/graphs/langgraph-dev
+WORKDIR /app/worker-js/examples/langgraph-dev
 RUN npm install
     # 构建 langgraph-dev 项目
     RUN npm run build
@@ -61,15 +58,14 @@ RUN touch .env && \
 WORKDIR /app/worker-js
 
 # 设置默认的图配置环境变量
-ENV LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/worker-js/graphs/langgraph-dev/dist/index.js:graph"}}
-ENV SERVER_URL=http://host.docker.internal:5050
+
 
 # 暴露端口
 EXPOSE 3001
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+    CMD node -e "require('http').get('http://localhost:$PORT/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 # 启动应用（运行编译后的 JavaScript 文件）
 RUN echo "Final working directory: $(pwd)"
 CMD ["node", "dist/main.js"]

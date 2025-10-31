@@ -4,19 +4,23 @@ services:
   # LangGraph Worker
   worker-js:
     build:
-      context: ../../..
-      dockerfile: worker-js/examples/langgraph-dev/Dockerfile
-    container_name: langgraph-dev-worker
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GIT_REPO: ${GIT_REPO}
+    container_name: worker-${GRAPH_NAME}
     ports:
       - "3001:3001"
     # 从.env文件加载环境变量
     env_file:
       - .env
+    environment:
+      WORKER_GRAPHS: '{"${GRAPH_NAME}":"/app/worker-js/examples/langgraph-dev/${GRAPH_PATH}:${GRAPH_EXPORT}"}'
     volumes:
       # 挂载.env文件，便于动态修改
       - ./.env:/app/.env
       # 挂载langgraph.json配置文件，便于动态修改图配置
-      - ./langgraph.json:/app/worker-js/graphs/langgraph-dev/langgraph.json:ro
+      - ./langgraph.json:/app/worker-js/examples/langgraph-dev/langgraph.json:ro
       # 可选：挂载代码以支持热重载开发
       # - ./:/app/graphs/langgraph-dev
     # 移除对 postgres 和 redis 的依赖，因为它们是共享服务
@@ -34,7 +38,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })",
+          "require('http').get('http://localhost:${PORT}/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })",
         ]
       interval: 30s
       timeout: 3s
