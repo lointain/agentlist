@@ -10,7 +10,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { checkpoints, events } from '../../share/shared-schema/src/index.mts';
+import { checkpoints, events } from "../../share/shared-schema/src/index.mts";
 
 // Assistants：助手定义，绑定到具体 graph
 export const assistants = pgTable("assistants", {
@@ -86,8 +86,6 @@ export const runs = pgTable(
     scheduledIdx: index("idx_runs_scheduled_at").on(table.scheduled_at),
   })
 );
-
-
 
 // Workers：工作者注册表（可选）
 export const workers = pgTable(

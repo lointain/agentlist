@@ -165,9 +165,7 @@ export class AgentListServer {
       port: this.config.port,
       hostname: this.config.host,
     });
-    logger.info(
-      `Server started at ${this.config.host}:${this.config.port}`
-    );
+    logger.info(`Server started at ${this.config.host}:${this.config.port}`);
     logger.info(
       `Database: ${this.config.databaseUrl.replace(/\/\/.*@/, "//***@")}`
     );
