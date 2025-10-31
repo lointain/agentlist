@@ -5,11 +5,9 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { contextStorage } from "hono/context-storage";
-import { z } from "zod";
-import dotenv from "dotenv";
+// 环境读取逻辑已抽离到 config/env.mts
+import { getEnv, buildServerConfigFromEnv } from "./config/env.mts";
 import path from "node:path";
-import fs from "node:fs";
-import crypto from "node:crypto";
 
 // 存储与队列适配器
 import { PostgresAdapter } from "./storage/postgres.mts";
@@ -43,36 +41,8 @@ import assistants from "./api/assistants.mts";
 import store from "./api/store.mts";
 import meta from "./api/meta.mts";
 
-// 配置与环境变量解析
-// 在开发模式下优先加载仓库根目录的 .env.dev，兼容不同工作目录
-(() => {
-  try {
-    const cwd = process.cwd();
-    const candidates = [
-      path.join(cwd, ".env.dev"),
-      path.join(cwd, "..", ".env.dev"),
-      path.join(cwd, "..", "..", ".env.dev"),
-    ];
-    // 如用户通过 DOTENV_CONFIG_PATH 指定路径，则优先使用
-    const explicit = process.env.DOTENV_CONFIG_PATH;
-    if (explicit && fs.existsSync(explicit)) {
-      dotenv.config({ path: explicit });
-      return;
-    }
-    // 自动探测 .env.dev
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        dotenv.config({ path: p });
-        return;
-      }
-    }
-    // 回退到默认 .env
-    dotenv.config();
-  } catch {
-    // 静默回退
-    dotenv.config();
-  }
-})();
+// 环境变量读取已经移至 config/env.mts：
+// 先读系统环境变量；若缺失关键项，则回退到仓库根目录 .env
 
 // 服务器配置接口
 export interface ServerConfig {
@@ -88,18 +58,7 @@ export interface ServerConfig {
 }
 
 // 使用 zod 校验环境变量（类型安全）
-export const ServerConfigSchema = z.object({
-  PORT: z.string().default("8000"),
-  HOST: z.string().default("0.0.0.0"),
-  DATABASE_URL: z.string(),
-  REDIS_URL: z.string(),
-  WORKER_JS_URL: z.string().optional(),
-  WORKER_PY_URL: z.string().optional(),
-  ENABLE_RATE_LIMIT: z.string().default("true"),
-  ENABLE_AUTH: z.string().default("false"),
-  MAX_CONNECTIONS: z.string().default("10"),
-  HEALTH_CHECK_INTERVAL: z.string().default("10000"),
-});
+// 说明：环境变量 schema 与默认值已迁移到 config/env.mts
 
 // 主服务类
 export class AgentListServer {
@@ -199,7 +158,7 @@ export class AgentListServer {
 
   // 启动服务与健康检查
   async start(): Promise<void> {
-    await this.registerConfiguredWorkers();
+    // 按照设计，总控启动后等待 Worker 主动注册，不再使用环境预注册
     this.workerRegistry.startHealthCheck();
     serve({
       fetch: this.app.fetch,
@@ -233,39 +192,14 @@ export class AgentListServer {
     logger.info("Orchestrator stopped");
   }
 
-  // 根据环境变量注册预配置的 Worker
-  private async registerConfiguredWorkers(): Promise<void> {
-    const jsUrl = process.env.WORKER_JS_URL || this.config.workers.js;
-    const pyUrl = process.env.WORKER_PY_URL || this.config.workers.python;
-    if (jsUrl)
-      this.workerRegistry.registerWorker({
-        workerId: "worker-js",
-        workerType: "js",
-        url: jsUrl,
-      });
-    if (pyUrl)
-      this.workerRegistry.registerWorker({
-        workerId: "worker-py",
-        workerType: "python",
-        url: pyUrl,
-      });
-  }
+  // 已移除环境预注册逻辑：Worker 将通过 /workers/register 主动注册
 }
 
 // 从环境变量构建配置并运行
 export function startServerFromEnv(): AgentListServer {
-  const env = ServerConfigSchema.parse(process.env);
-  const config: ServerConfig = {
-    port: Number(env.PORT),
-    host: env.HOST,
-    databaseUrl: env.DATABASE_URL,
-    redisUrl: env.REDIS_URL,
-    workers: { js: env.WORKER_JS_URL, python: env.WORKER_PY_URL },
-    enableRateLimit: env.ENABLE_RATE_LIMIT === "true",
-    enableAuth: env.ENABLE_AUTH === "true",
-    maxConnections: Number(env.MAX_CONNECTIONS),
-    healthCheckInterval: Number(env.HEALTH_CHECK_INTERVAL),
-  };
+  // 读取并校验环境变量（系统优先，缺失则回退到仓库根 .env）
+  const env = getEnv();
+  const config: ServerConfig = buildServerConfigFromEnv(env);
   const server = new AgentListServer(config);
   return server;
 }
@@ -276,8 +210,12 @@ export async function main(): Promise<void> {
   await server.start();
 }
 
-// 如果直接运行此文件，启动服务器
-if (import.meta.url === `file://${process.argv[1]}`) {
+// 如果直接运行此文件，启动服务器（兼容 Windows 路径与 tsx）
+const argvPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+const argvFileUrl = argvPath
+  ? new URL(`file://${argvPath.replace(/\\/g, "/")}`).href
+  : "";
+if (import.meta.url === argvFileUrl) {
   main().catch((error) => {
     logger.error("Failed to start server:", error);
     process.exit(1);

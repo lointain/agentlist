@@ -2,6 +2,8 @@
 // 说明：负责事件发射/持久化与 SSE 历史转发，从 main.mts 中拆出以便复用与维护
 
 import type { RuntimeDeps, RunContext } from "./types.mts";
+import { events } from "../../../packages/shared-schema/src/index.mts";
+import { desc, eq } from "drizzle-orm";
 
 // 写事件到 Postgres 的 events 表（保持与 main.mts 相同的列名与语义）
 export async function writeEvent(
@@ -10,11 +12,30 @@ export async function writeEvent(
   type: string,
   data: any
 ): Promise<void> {
-  if (!deps.pool) return;
-  await deps.pool.query(
-    `INSERT INTO events (event_id, run_id, type, data, created_at) VALUES (uuid_generate_v4(), $1, $2, $3, NOW())`,
-    [runId, type, JSON.stringify(data)]
-  );
+  const maxRetries = 3;
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      if (deps.db) {
+        await deps.db.insert(events).values({
+          run_id: runId as any,
+          type,
+          data: data as any,
+        });
+        return;
+      }
+      if (!deps.pool) return;
+      await deps.pool.query(
+        `INSERT INTO events (event_id, run_id, type, data, created_at) VALUES (uuid_generate_v4(), $1, $2, $3, NOW())`,
+        [runId, type, JSON.stringify(data)]
+      );
+      return;
+    } catch (err) {
+      attempt++;
+      deps.logger.warn(`writeEvent failed (attempt ${attempt}): ${String(err)}`);
+      await new Promise((r) => setTimeout(r, 100 * attempt));
+    }
+  }
 }
 
 // 读取某个 run 的历史事件（按时间顺序）
@@ -22,6 +43,16 @@ export async function readEvents(
   deps: RuntimeDeps,
   runId: string
 ): Promise<Array<{ event: string; data: any; timestamp: number }>> {
+  if (deps.db) {
+    const rows = await deps.db
+      .select({ event: events.type, data: events.data, created_at: events.created_at })
+      .from(events)
+      .where(eq(events.run_id, runId as any))
+      .orderBy(desc(events.created_at));
+    // 由于原实现按 ASC，这里再反转为 ASC
+    rows.reverse();
+    return rows.map((r) => ({ event: r.event as string, data: r.data, timestamp: Number((r.created_at as Date).getTime()) }));
+  }
   if (!deps.pool) return [];
   const res = await deps.pool.query(
     `SELECT type AS event, data, extract(epoch from created_at)*1000 AS timestamp FROM events WHERE run_id = $1 ORDER BY created_at ASC`,

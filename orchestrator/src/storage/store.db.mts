@@ -1,11 +1,14 @@
-// 基于 Postgres 的 Store 适配器
-// 说明：替换原来的文件系统 InMemoryStore，改为使用数据库表 `store`
-// - key 采用扁平字符串，约定以命名空间拼接：namespace.join('.') + '.' + key
+// 基于 Drizzle ORM 的 Store 适配器（统一改造）
+// - key 采用扁平字符串：namespace.join('.') + '.' + key
 // - value 使用 JSONB 存储
-// 注意：该实现为最小可用版本，满足现有 API（list/search/get/put/delete）需求
+// - 完全使用 Drizzle 进行 CRUD
 
 import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { desc, eq, sql } from "drizzle-orm";
+import { store as tblStore } from "./schema.mts";
 import type { Item } from "@langchain/langgraph";
+import { getEnv } from "../config/env.mts";
 
 // 帮助函数：将命名空间与 key 拼接为唯一键
 const nsKey = (namespace: string[] | undefined, key: string) => {
@@ -17,15 +20,17 @@ const nsKey = (namespace: string[] | undefined, key: string) => {
 const splitNsKey = (flatKey: string): { namespace: string[]; key: string } => {
   const parts = flatKey.split(".");
   if (parts.length <= 1) return { namespace: [], key: flatKey };
-  const key = parts.pop()!;
-  return { namespace: parts, key };
+  const k = parts.pop()!;
+  return { namespace: parts, key: k };
 };
 
-export class PostgresStoreAdapter {
+export class DrizzleStoreAdapter {
   private pool: Pool;
+  private db: ReturnType<typeof drizzle>;
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString, max: 10 });
+    this.db = drizzle(this.pool);
   }
 
   // 列出命名空间：按前缀/后缀与最大深度进行过滤，返回所有存在的命名空间路径
@@ -38,14 +43,15 @@ export class PostgresStoreAdapter {
   }): Promise<string[][]> {
     const { limit = 100, offset = 0, prefix, suffix, maxDepth } = options;
 
-    // 简化实现：读出所有 key，然后在内存中按规则聚合命名空间
-    const res = await this.pool.query(
-      `SELECT key FROM store ORDER BY updated_at DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
+    const rows = await this.db
+      .select({ key: tblStore.key })
+      .from(tblStore)
+      .orderBy(desc(tblStore.updated_at))
+      .limit(limit)
+      .offset(offset);
 
     const set = new Set<string>();
-    for (const row of res.rows) {
+    for (const row of rows) {
       const { namespace } = splitNsKey(row.key as string);
       if (
         prefix &&
@@ -80,35 +86,43 @@ export class PostgresStoreAdapter {
   ): Promise<Item[]> {
     const { limit = 10, offset = 0, query } = options;
 
-    // 简化：query 采用将 JSON 转文本后 ILIKE 的方式（性能一般，但可用）
-    const where: string[] = [];
-    const params: any[] = [];
-
+    const whereClauses = [] as any[];
     if (namespacePrefix && namespacePrefix.length) {
-      where.push(`key LIKE $${params.length + 1}`);
-      params.push(`${namespacePrefix.join(".")}.%`);
+      whereClauses.push(
+        sql`${tblStore.key} LIKE ${namespacePrefix.join(".") + ".%"}`
+      );
     }
-
     if (query && query.trim().length) {
-      where.push(`CAST(value AS TEXT) ILIKE $${params.length + 1}`);
-      params.push(`%${query}%`);
+      whereClauses.push(
+        sql`CAST(${tblStore.value} AS TEXT) ILIKE ${"%" + query + "%"}`
+      );
     }
 
-    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const res = await this.pool.query(
-      `SELECT key, value, updated_at FROM store ${whereClause} ORDER BY updated_at DESC LIMIT $${
-        params.length + 1
-      } OFFSET $${params.length + 2}`,
-      [...params, limit, offset]
-    );
+    const rows = await this.db
+      .select({
+        key: tblStore.key,
+        value: tblStore.value,
+        updated_at: tblStore.updated_at,
+      })
+      .from(tblStore)
+      .where(
+        whereClauses.length === 0
+          ? undefined
+          : whereClauses.reduce(
+              (acc, clause) => (acc ? sql`${acc} AND ${clause}` : clause),
+              undefined as any
+            )
+      )
+      .orderBy(desc(tblStore.updated_at))
+      .limit(limit)
+      .offset(offset);
 
-    return res.rows.map((row) => {
+    return rows.map((row) => {
       const { namespace, key } = splitNsKey(row.key as string);
       return {
         namespace,
         key,
         value: row.value,
-        // 该表当前只有 updated_at，这里将 createdAt 等同于 updated_at 以兼容 API
         createdAt: row.updated_at,
         updatedAt: row.updated_at,
       } as Item;
@@ -122,18 +136,19 @@ export class PostgresStoreAdapter {
     value: unknown
   ): Promise<void> {
     const flatKey = nsKey(namespace, key);
-    await this.pool.query(
-      `INSERT INTO store (key, value, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-      [flatKey, JSON.stringify(value)]
-    );
+    await this.db
+      .insert(tblStore)
+      .values({ key: flatKey, value: value as any, updated_at: new Date() })
+      .onConflictDoUpdate({
+        target: tblStore.key,
+        set: { value: value as any, updated_at: new Date() },
+      });
   }
 
   // 删除
   async delete(namespace: string[] | undefined, key: string): Promise<void> {
     const flatKey = nsKey(namespace, key);
-    await this.pool.query(`DELETE FROM store WHERE key = $1`, [flatKey]);
+    await this.db.delete(tblStore).where(eq(tblStore.key, flatKey));
   }
 
   // 获取单条
@@ -142,12 +157,17 @@ export class PostgresStoreAdapter {
     key: string
   ): Promise<Item | null> {
     const flatKey = nsKey(namespace, key);
-    const res = await this.pool.query(
-      `SELECT key, value, updated_at FROM store WHERE key = $1`,
-      [flatKey]
-    );
-    if (!res.rowCount) return null;
-    const row = res.rows[0];
+    const rows = await this.db
+      .select({
+        key: tblStore.key,
+        value: tblStore.value,
+        updated_at: tblStore.updated_at,
+      })
+      .from(tblStore)
+      .where(eq(tblStore.key, flatKey))
+      .limit(1);
+    if (!rows.length) return null;
+    const row = rows[0];
     const { namespace: ns, key: k } = splitNsKey(row.key as string);
     return {
       namespace: ns,
@@ -160,15 +180,17 @@ export class PostgresStoreAdapter {
 }
 
 // 便捷导出：从环境变量读取数据库连接，暴露实例
-// 注：如需复用连接，可改为由 server.mts 注入连接池，这里保持最小改动
-const DATABASE_URL = process.env.DATABASE_URL;
+// 优先使用系统环境；若缺失则回退到仓库根 .env（由 getEnv() 处理）
+let DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
-  // 仅日志提示，不抛错，避免开发环境未配置时直接崩溃
-  console.warn(
-    "[PostgresStoreAdapter] DATABASE_URL 未设置，store API 将不可用"
-  );
+  try {
+    const env = getEnv();
+    DATABASE_URL = env.DATABASE_URL;
+  } catch {
+    // 保持静默，避免在模块导入阶段抛错
+  }
 }
 
 export const storeDb = DATABASE_URL
-  ? new PostgresStoreAdapter(DATABASE_URL)
+  ? new DrizzleStoreAdapter(DATABASE_URL)
   : undefined;

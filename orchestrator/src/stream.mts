@@ -1,4 +1,5 @@
-import { BaseMessageChunk, isBaseMessage } from "@langchain/core/messages";
+import type { BaseMessageChunk } from "@langchain/core/messages";
+import { isBaseMessage } from "@langchain/core/messages";
 import { LangChainTracer } from "@langchain/core/tracers/tracer_langchain";
 import type {
   BaseCheckpointSaver,

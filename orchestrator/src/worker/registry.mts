@@ -5,7 +5,8 @@ export interface WorkerInfo {
   workerId: string;
   workerType: "js" | "python";
   endpointUrl: string;
-  status: "active" | "inactive" | "unhealthy";
+  // 增加 paused 状态，表示因心跳连续超时被人工介入前暂停
+  status: "active" | "inactive" | "unhealthy" | "paused";
   capabilities: {
     graphs: string[];
     maxConcurrency?: number;
@@ -17,6 +18,8 @@ export interface WorkerInfo {
     avgResponseTime: number;
     errorRate: number;
   };
+  // 连续心跳丢失计数，用于达到阈值后暂停
+  missedHeartbeats: number;
   lastHeartbeat: Date;
   createdAt: Date;
   updatedAt: Date;
@@ -95,6 +98,7 @@ export class WorkerRegistry {
         avgResponseTime: 0,
         errorRate: 0,
       },
+      missedHeartbeats: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -200,6 +204,7 @@ export class WorkerRegistry {
     if (worker) {
       worker.lastHeartbeat = new Date();
       worker.status = "active";
+      worker.missedHeartbeats = 0;
       worker.updatedAt = new Date();
     }
   }
@@ -234,6 +239,10 @@ export class WorkerRegistry {
     const now = new Date();
 
     for (const worker of workers) {
+      // 暂停的 Worker 不参与健康检查与选用
+      if (worker.status === "paused") {
+        continue;
+      }
       try {
         const client = this.clients.get(worker.workerId);
         if (!client) {
@@ -242,10 +251,21 @@ export class WorkerRegistry {
 
         // 检查心跳超时
         const heartbeatAge = now.getTime() - worker.lastHeartbeat.getTime();
-        if (heartbeatAge > this.healthCheckIntervalMs * 2) {
-          worker.status = "inactive";
-          console.warn(`Worker ${worker.workerId} heartbeat timeout`);
-          continue;
+        if (heartbeatAge > this.healthCheckIntervalMs) {
+          worker.missedHeartbeats += 1;
+          if (worker.missedHeartbeats >= 10) {
+            worker.status = "paused";
+            console.warn(
+              `Worker ${worker.workerId} paused after ${worker.missedHeartbeats} missed heartbeats`
+            );
+            continue;
+          } else {
+            worker.status = "inactive";
+            console.warn(
+              `Worker ${worker.workerId} heartbeat missed (${worker.missedHeartbeats})`
+            );
+            // 继续进行健康检查尝试
+          }
         }
 
         // 执行健康检查
@@ -272,6 +292,25 @@ export class WorkerRegistry {
       }
 
       worker.updatedAt = now;
+    }
+  }
+
+  // 人工暂停/恢复
+  pauseWorker(workerId: string): void {
+    const worker = this.workers.get(workerId);
+    if (worker) {
+      worker.status = "paused";
+      worker.updatedAt = new Date();
+    }
+  }
+
+  resumeWorker(workerId: string): void {
+    const worker = this.workers.get(workerId);
+    if (worker) {
+      worker.status = "active";
+      worker.missedHeartbeats = 0;
+      worker.lastHeartbeat = new Date();
+      worker.updatedAt = new Date();
     }
   }
 

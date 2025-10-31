@@ -12,6 +12,7 @@ import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
 import winston from "winston";
 import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 // 运行时模块：类型与事件/检查点逻辑
 import { GraphInstance, RunContext, WorkerConfig } from "./runtime/types.mts";
 import { writeCheckpoint as rtWriteCheckpoint, readLastCheckpoint as rtReadLastCheckpoint } from "./runtime/checkpoints.mts";
@@ -25,7 +26,7 @@ import { getGraph as getWorkerGraph, registerFromEnv as registerGraphsFromEnv } 
 import { parseLanggraphJson, tryParseDefaultLanggraphJson } from "./graph/langgraph.config.mts";
 
 // 加载环境变量
-dotenv.config();
+dotenv.config({ path: "../../.env.dev" });
 
 // 配置日志
 const logger = winston.createLogger({
@@ -73,6 +74,8 @@ export class AgentListWorker {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   // Postgres 连接池：用于写入检查点
   private pool: Pool;
+  // Drizzle 数据库实例：用于统一 ORM 写入
+  private db: ReturnType<typeof drizzle> | undefined;
 
   constructor(config: WorkerConfig) {
     this.config = config;
@@ -83,6 +86,13 @@ export class AgentListWorker {
       logger.warn('DATABASE_URL 未配置，Worker 将无法写入检查点。');
     }
     this.pool = new Pool({ connectionString: databaseUrl, max: 10 });
+    // 初始化 Drizzle（若存在数据库配置）
+    try {
+      this.db = drizzle(this.pool);
+    } catch (err) {
+      logger.warn(`初始化 Drizzle 失败，将回退到 Pool 直写：${String(err)}`);
+      this.db = undefined;
+    }
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -323,11 +333,11 @@ export class AgentListWorker {
   }
 
   private emitEvent(runContext: RunContext, event: string, data: any): void {
-    rtEmitEvent({ pool: this.pool, logger }, runContext, event, data);
+    rtEmitEvent({ pool: this.pool, db: this.db, logger }, runContext, event, data);
   }
 
   private streamRunEvents(runContext: RunContext, controller: ReadableStreamDefaultController): void {
-    rtStreamRunEvents({ pool: this.pool, logger }, runContext, controller).catch((err) => {
+    rtStreamRunEvents({ pool: this.pool, db: this.db, logger }, runContext, controller).catch((err) => {
       const line = `event: error\ndata: ${JSON.stringify({ message: String(err) })}\n\n`;
       controller.enqueue(new TextEncoder().encode(line));
       controller.close();
@@ -336,12 +346,12 @@ export class AgentListWorker {
 
   // 将检查点写入 Postgres：每个 values 事件作为一个 step
   private async writeCheckpoint(runContext: RunContext, stepIndex: number, data: any): Promise<void> {
-    return rtWriteCheckpoint({ pool: this.pool, logger }, runContext, stepIndex, data);
+    return rtWriteCheckpoint({ pool: this.pool, db: this.db, logger }, runContext, stepIndex, data);
   }
 
   // 从 Postgres 读取最近检查点（用于断点续跑）
   private async readLastCheckpoint(runId: string): Promise<{ step_index: number; data: any } | null> {
-    return rtReadLastCheckpoint({ pool: this.pool, logger }, runId);
+    return rtReadLastCheckpoint({ pool: this.pool, db: this.db, logger }, runId);
   }
 
   // 将事件写入 Postgres 的 events 表（SSE 持久化）

@@ -114,12 +114,17 @@ export class PostgresRuns implements RunsRepo {
 
     // 3) 多任务策略：reject 时检测该线程是否已有在途任务（保持原生 SQL，性能更优）
     if (options.multitaskStrategy === "reject" && options.threadId) {
-      const runningRuns = await this.pool.query(
-        `SELECT run_id FROM runs 
-         WHERE thread_id = $1 AND status IN ('pending', 'running')`,
-        [options.threadId]
-      );
-      if (runningRuns.rowCount > 0) {
+      const runningRuns = await this.db
+        .select({ run_id: tblRuns.run_id })
+        .from(tblRuns)
+        .where(
+          and(
+            eq(tblRuns.thread_id, options.threadId),
+            inArray(tblRuns.status, ["pending", "running"]) as any
+          )
+        )
+        .limit(1);
+      if (runningRuns.length > 0) {
         throw new Error(`Thread ${options.threadId} already has running tasks`);
       }
     }
@@ -163,54 +168,52 @@ export class PostgresRuns implements RunsRepo {
     signal: AbortSignal;
   }> {
     while (true) {
-      const client = await this.pool.connect();
       try {
-        await client.query("BEGIN");
+        const selected = await this.db.transaction(async (tx) => {
+          // 使用 SKIP LOCKED 避免锁等待，提升并发调度
+          const res = await tx.execute(sql`
+            SELECT r.*, a.graph_id, a.config as assistant_config
+            FROM runs r
+            JOIN assistants a ON r.assistant_id = a.id
+            WHERE r.status = 'pending'
+              AND r.scheduled_at <= NOW()
+              AND NOT EXISTS (
+                SELECT 1 FROM runs r2
+                WHERE r2.thread_id = r.thread_id
+                  AND r2.status = 'running'
+              )
+            ORDER BY r.created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 10
+          `);
 
-        // 使用 SKIP LOCKED 避免锁等待，提升并发调度
-        const res = await client.query(
-          `SELECT r.*, a.graph_id, a.config as assistant_config
-           FROM runs r
-           JOIN assistants a ON r.assistant_id = a.id
-           WHERE r.status = 'pending' 
-             AND r.scheduled_at <= NOW()
-             AND NOT EXISTS (
-               SELECT 1 FROM runs r2 
-               WHERE r2.thread_id = r.thread_id 
-                 AND r2.status = 'running'
-             )
-           ORDER BY r.created_at ASC
-           FOR UPDATE SKIP LOCKED 
-           LIMIT 10`
-        );
+          if ((res as any).rowCount === 0) {
+            return [] as any[];
+          }
 
-        if (res.rowCount === 0) {
-          await client.query("COMMIT");
-          client.release();
-          // 空闲等待一段时间再尝试
+          const rows = (res as any).rows as any[];
+          for (const row of rows) {
+            const runId = row.run_id as string;
+            await tx.execute(sql`
+              UPDATE runs SET
+                status = 'running',
+                attempt = attempt + 1,
+                started_at = NOW(),
+                updated_at = NOW()
+              WHERE run_id = ${runId}
+            `);
+          }
+          return rows;
+        });
+
+        if (!selected || selected.length === 0) {
           await new Promise((r) => setTimeout(r, 200));
           continue;
         }
 
-        for (const row of res.rows) {
+        for (const row of selected) {
           const runId = row.run_id as string;
-
-          // 将状态置为 running，增加 attempt
-          await client.query(
-            `UPDATE runs SET 
-               status = 'running', 
-               attempt = attempt + 1,
-               started_at = NOW(),
-               updated_at = NOW() 
-             WHERE run_id = $1`,
-            [runId]
-          );
-
-          await client.query("COMMIT");
-
-          // 创建取消信号（实际应用中可用 Redis Pub/Sub 等跨进程机制）
           const controller = new AbortController();
-
           yield {
             run: {
               run_id: runId,
@@ -221,19 +224,16 @@ export class PostgresRuns implements RunsRepo {
               metadata: row.metadata,
               graph_id: row.graph_id,
               config: row.assistant_config,
-              attempt: row.attempt + 1,
+              attempt: (row.attempt ?? 0) + 1,
               created_at: row.created_at,
               updated_at: new Date(),
             } as Run,
-            attempt: row.attempt + 1,
+            attempt: (row.attempt ?? 0) + 1,
             signal: controller.signal,
           };
         }
       } catch (e) {
-        await client.query("ROLLBACK");
         throw e;
-      } finally {
-        client.release();
       }
     }
   }
@@ -281,26 +281,12 @@ export class PostgresRuns implements RunsRepo {
     status: string,
     metadata?: Metadata
   ): Promise<void> {
-    const updateFields = ["status = $2", "updated_at = NOW()"];
-    const values = [runId, status];
-
-    if (metadata) {
-      updateFields.push("metadata = $3");
-      values.push(JSON.stringify(metadata));
+    const set: any = { status, updated_at: new Date() };
+    if (metadata) set.metadata = metadata as any;
+    if (["completed", "failed", "cancelled"].includes(status)) {
+      set.completed_at = new Date();
     }
-
-    if (
-      status === "completed" ||
-      status === "failed" ||
-      status === "cancelled"
-    ) {
-      updateFields.push("completed_at = NOW()");
-    }
-
-    await this.pool.query(
-      `UPDATE runs SET ${updateFields.join(", ")} WHERE run_id = $1`,
-      values
-    );
+    await this.db.update(tblRuns).set(set).where(eq(tblRuns.run_id, runId));
   }
 
   async search(
@@ -312,55 +298,58 @@ export class PostgresRuns implements RunsRepo {
       offset?: number;
     } = {}
   ): Promise<Run[]> {
-    const conditions = [];
-    const values = [];
-    let paramIndex = 1;
+    const {
+      threadId,
+      assistantId,
+      status = [],
+      limit = 50,
+      offset = 0,
+    } = options;
+    const whereParts = [] as any[];
+    if (threadId) whereParts.push(eq(tblRuns.thread_id, threadId));
+    if (assistantId) whereParts.push(eq(tblRuns.assistant_id, assistantId));
+    if (status.length > 0) whereParts.push(inArray(tblRuns.status, status));
 
-    if (options.threadId) {
-      conditions.push(`r.thread_id = $${paramIndex++}`);
-      values.push(options.threadId);
-    }
+    const rows = await this.db
+      .select({
+        run_id: tblRuns.run_id,
+        thread_id: tblRuns.thread_id,
+        assistant_id: tblRuns.assistant_id,
+        status: tblRuns.status,
+        kwargs: tblRuns.kwargs,
+        metadata: tblRuns.metadata,
+        attempt: tblRuns.attempt,
+        created_at: tblRuns.created_at,
+        updated_at: tblRuns.updated_at,
+        graph_id: tblAssistants.graph_id,
+        assistant_config: tblAssistants.config,
+      })
+      .from(tblRuns)
+      .innerJoin(tblAssistants, eq(tblRuns.assistant_id, tblAssistants.id))
+      .where(
+        whereParts.length
+          ? whereParts.reduce(
+              (acc, cur) => (acc ? sql`${acc} AND ${cur}` : cur),
+              undefined as any
+            )
+          : undefined
+      )
+      .orderBy(sql`r.created_at DESC`)
+      .limit(limit)
+      .offset(offset);
 
-    if (options.assistantId) {
-      conditions.push(`r.assistant_id = $${paramIndex++}`);
-      values.push(options.assistantId);
-    }
-
-    if (options.status && options.status.length > 0) {
-      conditions.push(`r.status = ANY($${paramIndex++})`);
-      values.push(options.status);
-    }
-
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
-
-    if (options.limit) values.push(options.limit);
-    if (options.offset) values.push(options.offset);
-
-    const res = await this.pool.query(
-      `SELECT r.*, a.graph_id, a.config as assistant_config
-       FROM runs r
-       JOIN assistants a ON r.assistant_id = a.id
-       ${whereClause}
-       ORDER BY r.created_at DESC
-       ${limitClause} ${offsetClause}`,
-      values
-    );
-
-    return res.rows.map((row) => ({
-      run_id: row.run_id,
-      thread_id: row.thread_id,
-      assistant_id: row.assistant_id,
-      status: row.status,
-      kwargs: row.kwargs,
-      metadata: row.metadata,
-      graph_id: row.graph_id,
-      config: row.assistant_config,
-      attempt: row.attempt,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+    return rows.map((row) => ({
+      run_id: row.run_id as string,
+      thread_id: row.thread_id as string,
+      assistant_id: row.assistant_id as string,
+      status: row.status as string,
+      kwargs: row.kwargs as any,
+      metadata: row.metadata as any,
+      graph_id: row.graph_id as string,
+      config: row.assistant_config as any,
+      attempt: row.attempt as number,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     })) as Run[];
   }
 
@@ -368,52 +357,75 @@ export class PostgresRuns implements RunsRepo {
     threadId: string,
     client?: PoolClient
   ): Promise<Run[]> {
-    const db = client || this.pool;
-    const res = await db.query(
-      `SELECT r.*, a.graph_id, a.config as assistant_config
-       FROM runs r
-       JOIN assistants a ON r.assistant_id = a.id
-       WHERE r.thread_id = $1 AND r.status IN ('pending','running') 
-       ORDER BY r.created_at ASC`,
-      [threadId]
-    );
+    const rows = await this.db
+      .select({
+        run_id: tblRuns.run_id,
+        thread_id: tblRuns.thread_id,
+        assistant_id: tblRuns.assistant_id,
+        status: tblRuns.status,
+        kwargs: tblRuns.kwargs,
+        metadata: tblRuns.metadata,
+        attempt: tblRuns.attempt,
+        created_at: tblRuns.created_at,
+        updated_at: tblRuns.updated_at,
+        graph_id: tblAssistants.graph_id,
+        assistant_config: tblAssistants.config,
+      })
+      .from(tblRuns)
+      .innerJoin(tblAssistants, eq(tblRuns.assistant_id, tblAssistants.id))
+      .where(
+        and(
+          eq(tblRuns.thread_id, threadId),
+          inArray(tblRuns.status, ["pending", "running"])
+        )
+      )
+      .orderBy(sql`r.created_at ASC`);
 
-    return res.rows.map((row) => ({
-      run_id: row.run_id,
-      thread_id: row.thread_id,
-      assistant_id: row.assistant_id,
-      status: row.status,
-      kwargs: row.kwargs,
-      metadata: row.metadata,
-      graph_id: row.graph_id,
-      config: row.assistant_config,
-      attempt: row.attempt,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+    return rows.map((row) => ({
+      run_id: row.run_id as string,
+      thread_id: row.thread_id as string,
+      assistant_id: row.assistant_id as string,
+      status: row.status as string,
+      kwargs: row.kwargs as any,
+      metadata: row.metadata as any,
+      graph_id: row.graph_id as string,
+      config: row.assistant_config as any,
+      attempt: row.attempt as number,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     })) as Run[];
   }
 }
 
 // PostgreSQL Threads 实现
 export class PostgresThreads implements ThreadsRepo {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly db: NodePgDatabase
+  ) {}
 
   async get(threadId: string): Promise<Thread | null> {
-    const res = await this.pool.query(
-      "SELECT * FROM threads WHERE thread_id = $1",
-      [threadId]
-    );
-
-    if (res.rowCount === 0) return null;
-
-    const row = res.rows[0];
+    const rows = await this.db
+      .select({
+        thread_id: tblThreads.thread_id,
+        status: tblThreads.status,
+        config: tblThreads.config,
+        metadata: tblThreads.metadata,
+        created_at: tblThreads.created_at,
+        updated_at: tblThreads.updated_at,
+      })
+      .from(tblThreads)
+      .where(eq(tblThreads.thread_id, threadId))
+      .limit(1);
+    if (rows.length === 0) return null;
+    const row = rows[0];
     return {
       thread_id: row.thread_id,
-      status: row.status,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      status: row.status as string,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     } as Thread;
   }
 
@@ -422,33 +434,48 @@ export class PostgresThreads implements ThreadsRepo {
     config: RunnableConfig,
     metadata?: Metadata
   ): Promise<Thread> {
-    const res = await this.pool.query(
-      `INSERT INTO threads(thread_id, config, metadata, created_at, updated_at)
-       VALUES($1, $2, $3, NOW(), NOW())
-       ON CONFLICT(thread_id) DO UPDATE SET
-         config = EXCLUDED.config,
-         metadata = EXCLUDED.metadata,
-         updated_at = NOW()
-       RETURNING *`,
-      [threadId, JSON.stringify(config), JSON.stringify(metadata ?? {})]
-    );
+    const rows = await this.db
+      .insert(tblThreads)
+      .values({
+        thread_id: threadId,
+        config: config as any,
+        metadata: (metadata ?? {}) as any,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: tblThreads.thread_id,
+        set: {
+          config: config as any,
+          metadata: (metadata ?? {}) as any,
+          updated_at: new Date(),
+        },
+      })
+      .returning({
+        thread_id: tblThreads.thread_id,
+        status: tblThreads.status,
+        config: tblThreads.config,
+        metadata: tblThreads.metadata,
+        created_at: tblThreads.created_at,
+        updated_at: tblThreads.updated_at,
+      });
 
-    const row = res.rows[0];
+    const row = rows[0];
     return {
       thread_id: row.thread_id,
-      status: row.status,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      status: row.status as string,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     } as Thread;
   }
 
   async updateStatus(threadId: string, status: string): Promise<void> {
-    await this.pool.query(
-      "UPDATE threads SET status = $2, updated_at = NOW() WHERE thread_id = $1",
-      [threadId, status]
-    );
+    await this.db
+      .update(tblThreads)
+      .set({ status, updated_at: new Date() })
+      .where(eq(tblThreads.thread_id, threadId));
   }
 
   async search(
@@ -459,109 +486,134 @@ export class PostgresThreads implements ThreadsRepo {
       offset?: number;
     } = {}
   ): Promise<Thread[]> {
-    const conditions = [];
-    const values = [];
-    let paramIndex = 1;
+    const { status, metadata, limit = 50, offset = 0 } = options;
+    const whereParts = [] as any[];
+    if (status) whereParts.push(eq(tblThreads.status, status));
+    if (metadata)
+      whereParts.push(
+        sql`${tblThreads.metadata} @> ${JSON.stringify(metadata)}::jsonb`
+      );
 
-    if (options.status) {
-      conditions.push(`status = $${paramIndex++}`);
-      values.push(options.status);
-    }
+    const rows = await this.db
+      .select({
+        thread_id: tblThreads.thread_id,
+        status: tblThreads.status,
+        config: tblThreads.config,
+        metadata: tblThreads.metadata,
+        created_at: tblThreads.created_at,
+        updated_at: tblThreads.updated_at,
+      })
+      .from(tblThreads)
+      .where(
+        whereParts.length
+          ? whereParts.reduce(
+              (acc, cur) => (acc ? sql`${acc} AND ${cur}` : cur),
+              undefined as any
+            )
+          : undefined
+      )
+      .orderBy(sql`created_at DESC`)
+      .limit(limit)
+      .offset(offset);
 
-    if (options.metadata) {
-      conditions.push(`metadata @> $${paramIndex++}`);
-      values.push(JSON.stringify(options.metadata));
-    }
-
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
-
-    if (options.limit) values.push(options.limit);
-    if (options.offset) values.push(options.offset);
-
-    const res = await this.pool.query(
-      `SELECT * FROM threads ${whereClause} ORDER BY created_at DESC ${limitClause} ${offsetClause}`,
-      values
-    );
-
-    return res.rows.map((row) => ({
+    return rows.map((row) => ({
       thread_id: row.thread_id,
-      status: row.status,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      status: row.status as string,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     })) as Thread[];
   }
 
   async delete(threadId: string): Promise<void> {
-    await this.pool.query("DELETE FROM threads WHERE thread_id = $1", [
-      threadId,
-    ]);
+    await this.db.delete(tblThreads).where(eq(tblThreads.thread_id, threadId));
   }
 }
 
 // PostgreSQL Assistants 实现
 export class PostgresAssistants implements AssistantsRepo {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly db: NodePgDatabase
+  ) {}
 
   async get(assistantId: string): Promise<Assistant | null> {
-    const res = await this.pool.query(
-      "SELECT * FROM assistants WHERE id = $1",
-      [assistantId]
-    );
-
-    if (res.rowCount === 0) return null;
-
-    const row = res.rows[0];
+    const rows = await this.db
+      .select({
+        id: tblAssistants.id,
+        graph_id: tblAssistants.graph_id,
+        name: tblAssistants.name,
+        description: tblAssistants.description,
+        config: tblAssistants.config,
+        metadata: tblAssistants.metadata,
+        created_at: tblAssistants.created_at,
+        updated_at: tblAssistants.updated_at,
+      })
+      .from(tblAssistants)
+      .where(eq(tblAssistants.id, assistantId))
+      .limit(1);
+    if (rows.length === 0) return null;
+    const row = rows[0];
     return {
       id: row.id,
-      graph_id: row.graph_id,
-      name: row.name,
-      description: row.description,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      graph_id: row.graph_id as string,
+      name: row.name as string,
+      description: row.description as string | null,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     } as Assistant;
   }
 
   async put(
     assistant: Omit<Assistant, "created_at" | "updated_at">
   ): Promise<Assistant> {
-    const res = await this.pool.query(
-      `INSERT INTO assistants(id, graph_id, name, description, config, metadata, created_at, updated_at)
-       VALUES($1, $2, $3, $4, $5, $6, NOW(), NOW())
-       ON CONFLICT(id) DO UPDATE SET
-         graph_id = EXCLUDED.graph_id,
-         name = EXCLUDED.name,
-         description = EXCLUDED.description,
-         config = EXCLUDED.config,
-         metadata = EXCLUDED.metadata,
-         updated_at = NOW()
-       RETURNING *`,
-      [
-        assistant.id,
-        assistant.graph_id,
-        assistant.name,
-        assistant.description,
-        JSON.stringify(assistant.config),
-        JSON.stringify(assistant.metadata),
-      ]
-    );
+    const rows = await this.db
+      .insert(tblAssistants)
+      .values({
+        id: assistant.id,
+        graph_id: assistant.graph_id,
+        name: assistant.name,
+        description: assistant.description ?? null,
+        config: assistant.config as any,
+        metadata: assistant.metadata as any,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: tblAssistants.id,
+        set: {
+          graph_id: assistant.graph_id,
+          name: assistant.name,
+          description: assistant.description ?? null,
+          config: assistant.config as any,
+          metadata: assistant.metadata as any,
+          updated_at: new Date(),
+        },
+      })
+      .returning({
+        id: tblAssistants.id,
+        graph_id: tblAssistants.graph_id,
+        name: tblAssistants.name,
+        description: tblAssistants.description,
+        config: tblAssistants.config,
+        metadata: tblAssistants.metadata,
+        created_at: tblAssistants.created_at,
+        updated_at: tblAssistants.updated_at,
+      });
 
-    const row = res.rows[0];
+    const row = rows[0];
     return {
       id: row.id,
-      graph_id: row.graph_id,
-      name: row.name,
-      description: row.description,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      graph_id: row.graph_id as string,
+      name: row.name as string,
+      description: row.description as string | null,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     } as Assistant;
   }
 
@@ -573,48 +625,53 @@ export class PostgresAssistants implements AssistantsRepo {
       offset?: number;
     } = {}
   ): Promise<Assistant[]> {
-    const conditions = [];
-    const values = [];
-    let paramIndex = 1;
+    const { graphId, metadata, limit = 50, offset = 0 } = options;
+    const whereParts = [] as any[];
+    if (graphId) whereParts.push(eq(tblAssistants.graph_id, graphId));
+    if (metadata)
+      whereParts.push(
+        sql`${tblAssistants.metadata} @> ${JSON.stringify(metadata)}::jsonb`
+      );
 
-    if (options.graphId) {
-      conditions.push(`graph_id = $${paramIndex++}`);
-      values.push(options.graphId);
-    }
+    const rows = await this.db
+      .select({
+        id: tblAssistants.id,
+        graph_id: tblAssistants.graph_id,
+        name: tblAssistants.name,
+        description: tblAssistants.description,
+        config: tblAssistants.config,
+        metadata: tblAssistants.metadata,
+        created_at: tblAssistants.created_at,
+        updated_at: tblAssistants.updated_at,
+      })
+      .from(tblAssistants)
+      .where(
+        whereParts.length
+          ? whereParts.reduce(
+              (acc, cur) => (acc ? sql`${acc} AND ${cur}` : cur),
+              undefined as any
+            )
+          : undefined
+      )
+      .orderBy(sql`created_at DESC`)
+      .limit(limit)
+      .offset(offset);
 
-    if (options.metadata) {
-      conditions.push(`metadata @> $${paramIndex++}`);
-      values.push(JSON.stringify(options.metadata));
-    }
-
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
-
-    if (options.limit) values.push(options.limit);
-    if (options.offset) values.push(options.offset);
-
-    const res = await this.pool.query(
-      `SELECT * FROM assistants ${whereClause} ORDER BY created_at DESC ${limitClause} ${offsetClause}`,
-      values
-    );
-
-    return res.rows.map((row) => ({
+    return rows.map((row) => ({
       id: row.id,
-      graph_id: row.graph_id,
-      name: row.name,
-      description: row.description,
-      config: row.config,
-      metadata: row.metadata,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
+      graph_id: row.graph_id as string,
+      name: row.name as string,
+      description: row.description as string | null,
+      config: row.config as any,
+      metadata: row.metadata as any,
+      created_at: row.created_at as Date,
+      updated_at: row.updated_at as Date,
     })) as Assistant[];
   }
 
   async delete(assistantId: string): Promise<void> {
-    await this.pool.query("DELETE FROM assistants WHERE id = $1", [
-      assistantId,
-    ]);
+    await this.db
+      .delete(tblAssistants)
+      .where(eq(tblAssistants.id, assistantId));
   }
 }

@@ -44,15 +44,16 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 检查点表 (Checkpoints)
+-- 检查点表 (Checkpoints) — 统一与 Drizzle schema
+DROP TABLE IF EXISTS checkpoints CASCADE;
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    thread_id UUID NOT NULL,
-    checkpoint_ns VARCHAR(255) DEFAULT '',
-    checkpoint_data JSONB NOT NULL,
-    metadata JSONB DEFAULT '{}',
-    parent_checkpoint_id UUID,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    thread_id UUID NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+    run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL DEFAULT 0,
+    data JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
 -- 键值存储表 (Store)
@@ -65,14 +66,14 @@ CREATE TABLE IF NOT EXISTS store (
     PRIMARY KEY (namespace, key)
 );
 
--- 事件表 (Events) - 用于 SSE 事件持久化
+-- 事件表 (Events) — 统一与 Drizzle schema
+DROP TABLE IF EXISTS events CASCADE;
 CREATE TABLE IF NOT EXISTS events (
-    id BIGSERIAL PRIMARY KEY,
-    run_id UUID NOT NULL,
-    event_type VARCHAR(100) NOT NULL,
-    event_data JSONB NOT NULL,
-    sequence_number INTEGER NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    type VARCHAR(100) NOT NULL,
+    data JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
 -- Worker 注册表
@@ -104,16 +105,96 @@ CREATE INDEX IF NOT EXISTS idx_runs_assistant_id ON runs(assistant_id);
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_metadata ON runs USING GIN(metadata);
 
--- Checkpoints 索引
-CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_id ON checkpoints(thread_id);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_ns ON checkpoints(thread_id, checkpoint_ns);
+-- Checkpoints 索引（用于快速查询与恢复）
+CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_run ON checkpoints(thread_id, run_id);
 
--- Store 索引
-CREATE INDEX IF NOT EXISTS idx_store_namespace ON store(namespace);
+-- Store 表（统一为扁平 key 主键，与 Drizzle schema 一致）
+DROP TABLE IF EXISTS store CASCADE;
+CREATE TABLE IF NOT EXISTS store (
+    key VARCHAR(255) PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
 
--- Events 索引
-CREATE INDEX IF NOT EXISTS idx_events_run_id_sequence ON events(run_id, sequence_number);
+-- Users / Roles / Permissions / Sessions（统一与 Drizzle schema 一致）
+DROP TABLE IF EXISTS role_permissions CASCADE;
+DROP TABLE IF EXISTS user_roles CASCADE;
+DROP TABLE IF EXISTS sessions CASCADE;
+DROP TABLE IF EXISTS permissions CASCADE;
+DROP TABLE IF EXISTS roles CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) NOT NULL,
+    username VARCHAR(255),
+    password_hash TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+CREATE TABLE IF NOT EXISTS roles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_roles_name ON roles(name);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_permissions_name ON permissions(name);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id UUID NOT NULL,
+    role_id UUID NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_roles ON user_roles(user_id, role_id);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id UUID NOT NULL,
+    permission_id UUID NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_role_permissions ON role_permissions(role_id, permission_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id UUID NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+-- Events 索引（用于历史事件回放）
+CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+
+-- 可选：为 Worker 创建受限角色，仅允许写入 checkpoints 与 events
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = 'agentlist_worker'
+    ) THEN
+        CREATE ROLE agentlist_worker;
+    END IF;
+END $$;
+
+GRANT INSERT, UPDATE ON TABLE checkpoints TO agentlist_worker;
+GRANT INSERT, UPDATE ON TABLE events TO agentlist_worker;
+REVOKE ALL ON TABLE runs FROM agentlist_worker;
+REVOKE ALL ON TABLE threads FROM agentlist_worker;
+REVOKE ALL ON TABLE assistants FROM agentlist_worker;
 
 -- Workers 索引
 CREATE INDEX IF NOT EXISTS idx_workers_type_status ON workers(worker_type, status);

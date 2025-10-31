@@ -11,14 +11,15 @@ export function registerWorkerRoutes(app: Hono): void {
       const body = await c.req.json();
       const workerId: string = body.workerId || crypto.randomUUID();
       const workerType: string = body.workerType || "js";
-      // 兼容字段：支持 url 或 endpointUrl
-      const url: string = body.url || body.endpointUrl;
-      if (!url) {
+      // 兼容字段：支持 url 或 endpointUrl，但统一传递 endpointUrl 给注册表
+      const endpointUrl: string = body.endpointUrl || body.url;
+      if (!endpointUrl) {
         return c.json({ error: "Missing worker url" }, 400);
       }
       const registry = c.get("workerRegistry");
-      registry.registerWorker({ workerId, workerType, url });
-      return c.json({ workerId, workerType, url }, 201);
+      // 统一字段名，便于后续管理与日志输出
+      registry.registerWorker({ workerId, workerType, endpointUrl });
+      return c.json({ workerId, workerType, endpointUrl }, 201);
     } catch (error) {
       logger.error("Failed to register worker:", error);
       return c.json({ error: "Internal error" }, 500);
@@ -64,6 +65,44 @@ export function registerWorkerRoutes(app: Hono): void {
       });
     } catch (error) {
       logger.warn("Worker heartbeat handling failed:", error);
+      return c.json({ ok: false }, 200);
+    }
+  });
+
+  // 手动暂停某个 Worker（达到暂停后不参与调度与健康检查）
+  app.post("/workers/:workerId/pause", (c) => {
+    try {
+      const workerId = c.req.param("workerId");
+      const registry = c.get("workerRegistry");
+      const maybePause = (registry as any).pauseWorker;
+      if (typeof maybePause === "function") {
+        try {
+          maybePause.call(registry, workerId);
+          return c.json({ ok: true, workerId, status: "paused" });
+        } catch {}
+      }
+      return c.json({ ok: false }, 200);
+    } catch (error) {
+      logger.warn("Worker pause handling failed:", error);
+      return c.json({ ok: false }, 200);
+    }
+  });
+
+  // 手动恢复某个 Worker（恢复心跳计数与状态）
+  app.post("/workers/:workerId/resume", (c) => {
+    try {
+      const workerId = c.req.param("workerId");
+      const registry = c.get("workerRegistry");
+      const maybeResume = (registry as any).resumeWorker;
+      if (typeof maybeResume === "function") {
+        try {
+          maybeResume.call(registry, workerId);
+          return c.json({ ok: true, workerId, status: "active" });
+        } catch {}
+      }
+      return c.json({ ok: false }, 200);
+    } catch (error) {
+      logger.warn("Worker resume handling failed:", error);
       return c.json({ ok: false }, 200);
     }
   });
