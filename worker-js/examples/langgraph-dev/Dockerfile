@@ -20,22 +20,11 @@ WORKDIR /app/worker-js
 RUN npm ci && npm cache clean --force
 
 # 安装langgraph-dev项目的依赖
-WORKDIR /app/worker-js/examples/langgraph-dev
-RUN npm install
-    # 构建 langgraph-dev 项目
-    RUN npm run build
-
-# 回到worker-js目录并构建应用
 WORKDIR /app/worker-js
-RUN echo "Current directory: $(pwd)" && ls -la
-# 查看TypeScript配置
-RUN cat tsconfig.json
-# 查看package.json中的构建脚本
-RUN cat package.json | grep -A 10 "scripts"
-# 检查源代码目录结构
-RUN find ./src -type f | sort
-# 构建 worker-js 项目
 RUN npm run build
+
+# 创建一个通用的目录用于挂载用户自定义的langgraph项目
+RUN mkdir -p /app/user-graphs
 
 # 安装bash（在创建非root用户前）
 RUN apk add --no-cache bash

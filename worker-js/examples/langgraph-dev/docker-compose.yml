@@ -15,14 +15,14 @@ services:
     env_file:
       - .env
     environment:
-      WORKER_GRAPHS: '{"${GRAPH_NAME}":"/app/worker-js/examples/langgraph-dev/${GRAPH_PATH}:${GRAPH_EXPORT}"}'
+      WORKER_GRAPHS: '{"${GRAPH_NAME}":"/app/user-graphs/${GRAPH_PATH}:${GRAPH_EXPORT}"}'
     volumes:
       # 挂载.env文件，便于动态修改
       - ./.env:/app/.env
       # 挂载langgraph.json配置文件，便于动态修改图配置
-      - ./langgraph.json:/app/worker-js/examples/langgraph-dev/langgraph.json:ro
-      # 可选：挂载代码以支持热重载开发
-      # - ./:/app/graphs/langgraph-dev
+      - ./langgraph.json:/app/user-graphs/langgraph.json:ro
+      # 挂载用户自定义的langgraph项目代码
+      - ./:/app/user-graphs:ro
     # 移除对 postgres 和 redis 的依赖，因为它们是共享服务
     # depends_on:
     #   postgres:
