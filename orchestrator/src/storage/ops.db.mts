@@ -84,7 +84,11 @@ class DatabaseRuns implements RunsRepo {
     return this.pg.runs.put(runId, assistantId, kwargs, options as any, auth);
   }
 
-  async *next(): AsyncGenerator<{ run: Run; attempt: number; signal: AbortSignal }> {
+  async *next(): AsyncGenerator<{
+    run: Run;
+    attempt: number;
+    signal: AbortSignal;
+  }> {
     // 复用 PostgresRuns.next() 的选取逻辑，但增强取消信号（Redis + 原始信号）
     for await (const { run, attempt, signal } of this.pg.runs.next()) {
       const controller = new AbortController();
@@ -99,9 +103,12 @@ class DatabaseRuns implements RunsRepo {
       );
 
       // 订阅 Redis 取消信号（interrupt/rollback），收到后中止执行
-      const unsubscribe = await this.cancel.subscribeCancelSignal(run.run_id, (action) => {
-        controller.abort(action as any);
-      });
+      const unsubscribe = await this.cancel.subscribeCancelSignal(
+        run.run_id,
+        (action) => {
+          controller.abort(action as any);
+        }
+      );
 
       // 将组合后的信号传递给 worker
       try {
@@ -113,22 +120,39 @@ class DatabaseRuns implements RunsRepo {
     }
   }
 
-  async get(runId: string, _threadId: string | undefined, _auth: AuthContext | undefined): Promise<Run | null> {
+  async get(
+    runId: string,
+    _threadId: string | undefined,
+    _auth: AuthContext | undefined
+  ): Promise<Run | null> {
     return this.pg.runs.get(runId);
   }
 
-  async delete(run_id: string, _thread_id: string | undefined, _auth: AuthContext | undefined): Promise<string | null> {
+  async delete(
+    run_id: string,
+    _thread_id: string | undefined,
+    _auth: AuthContext | undefined
+  ): Promise<string | null> {
     // 简化：直接标记为取消或删除逻辑可由业务约束决定，这里使用取消
     await this.pg.runs.updateStatus(run_id, "cancelled");
     return run_id;
   }
 
-  async wait(runId: string, _threadId: string | undefined, _auth: AuthContext | undefined): Promise<unknown> {
+  async wait(
+    runId: string,
+    _threadId: string | undefined,
+    _auth: AuthContext | undefined
+  ): Promise<unknown> {
     // 最小实现：等待完成可通过轮询状态或订阅 Redis 事件完成
     // 这里轮询 DB 状态，生产中可优化为使用通知/事件
     for (let i = 0; i < 300; i++) {
       const run = await this.pg.runs.get(runId);
-      if (run && ["success", "error", "timeout", "interrupted"].includes(run.status as any)) {
+      if (
+        run &&
+        ["success", "error", "timeout", "interrupted"].includes(
+          run.status as any
+        )
+      ) {
         return run.status;
       }
       await new Promise((r) => setTimeout(r, 1000));
@@ -136,7 +160,11 @@ class DatabaseRuns implements RunsRepo {
     return null;
   }
 
-  async join(runId: string, _threadId: string, _auth: AuthContext | undefined): Promise<unknown> {
+  async join(
+    runId: string,
+    _threadId: string,
+    _auth: AuthContext | undefined
+  ): Promise<unknown> {
     // 最小实现：直接返回状态（兼容 API 的 /join 行为），更复杂可返回检查点等
     const run = await this.pg.runs.get(runId);
     return run;
@@ -189,12 +217,18 @@ class RedisRunsStream implements RunsStreamRepo {
   async *join(
     runId: string,
     _threadId: string | undefined,
-    options: { ignore404?: boolean; cancelOnDisconnect?: AbortSignal; lastEventId: string | undefined },
+    options: {
+      ignore404?: boolean;
+      cancelOnDisconnect?: AbortSignal;
+      lastEventId: string | undefined;
+    },
     _auth: AuthContext | undefined
   ): AsyncGenerator<{ id?: string; event: string; data: unknown }> {
     // 如果需要断点续传，先回放历史（当 lastEventId = '-1' 或具体 ID 时）
     if (options.lastEventId && options.lastEventId !== "0") {
-      const history = await this.streams.getHistory(runId, { startId: options.lastEventId });
+      const history = await this.streams.getHistory(runId, {
+        startId: options.lastEventId,
+      });
       for (const evt of history) {
         yield { id: evt.id, event: evt.event, data: evt.data };
       }
@@ -202,7 +236,11 @@ class RedisRunsStream implements RunsStreamRepo {
 
     // 实时消费 Redis Streams 事件
     const startId = options.lastEventId ?? "0";
-    const consumer = this.streams.consume(runId, { startId, batchSize: 50, blockTime: 1000 });
+    const consumer = this.streams.consume(runId, {
+      startId,
+      batchSize: 50,
+      blockTime: 1000,
+    });
 
     const abort = options.cancelOnDisconnect;
     try {
@@ -215,7 +253,12 @@ class RedisRunsStream implements RunsStreamRepo {
     }
   }
 
-  async publish(payload: { runId: string; resumable: boolean; event: string; data: unknown | Error }): Promise<void> {
+  async publish(payload: {
+    runId: string;
+    resumable: boolean;
+    event: string;
+    data: unknown | Error;
+  }): Promise<void> {
     // 将事件写入 Redis Streams；保留 data 原样（已在调用方序列化 error）
     await this.streams.publish(payload.runId, payload.event, payload.data);
   }

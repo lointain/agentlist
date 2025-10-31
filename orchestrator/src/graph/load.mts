@@ -92,10 +92,16 @@ export async function getGraph(
       : GRAPHS[graphId];
 
   // orchestrator 不再默认提供 checkpointer，交由 worker-js 侧实现
-  compiled.checkpointer = typeof options?.checkpointer !== "undefined" ? options?.checkpointer ?? undefined : undefined;
+  compiled.checkpointer =
+    typeof options?.checkpointer !== "undefined"
+      ? options?.checkpointer ?? undefined
+      : undefined;
 
   // 默认使用 Postgres 版 store（如未配置数据库则为 undefined）
-  compiled.store = typeof options?.store !== "undefined" ? options?.store ?? undefined : storeDb;
+  compiled.store =
+    typeof options?.store !== "undefined"
+      ? options?.store ?? undefined
+      : storeDb;
 
   return compiled;
 }

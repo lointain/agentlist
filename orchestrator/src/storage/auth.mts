@@ -23,13 +23,23 @@ export class AuthStore {
     this.pool = pool;
   }
 
-  async createUser(email: string, passwordHash: string, opts?: { username?: string; metadata?: Record<string, any> }): Promise<UserRecord> {
+  async createUser(
+    email: string,
+    passwordHash: string,
+    opts?: { username?: string; metadata?: Record<string, any> }
+  ): Promise<UserRecord> {
     const id = crypto.randomUUID();
     const res = await this.pool.query(
       `INSERT INTO users (id, email, username, password_hash, status, metadata)
        VALUES ($1, $2, $3, $4, 'active', $5)
        RETURNING id, email, username, password_hash, status, metadata`,
-      [id, email, opts?.username ?? null, passwordHash, JSON.stringify(opts?.metadata ?? {})]
+      [
+        id,
+        email,
+        opts?.username ?? null,
+        passwordHash,
+        JSON.stringify(opts?.metadata ?? {}),
+      ]
     );
     return res.rows[0] as UserRecord;
   }
@@ -42,7 +52,10 @@ export class AuthStore {
     return res.rows[0] ?? null;
   }
 
-  async createSession(userId: string, ttlSeconds = 60 * 60 * 24 * 7): Promise<SessionRecord> {
+  async createSession(
+    userId: string,
+    ttlSeconds = 60 * 60 * 24 * 7
+  ): Promise<SessionRecord> {
     const token = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
     await this.pool.query(
@@ -110,7 +123,10 @@ export class AuthStore {
     );
   }
 
-  async grantPermissionToRole(roleName: string, permissionName: string): Promise<void> {
+  async grantPermissionToRole(
+    roleName: string,
+    permissionName: string
+  ): Promise<void> {
     const roleId = await this.ensureRole(roleName);
     const permId = await this.ensurePermission(permissionName);
     await this.pool.query(

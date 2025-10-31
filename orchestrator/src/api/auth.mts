@@ -21,13 +21,16 @@ const LoginSchema = z.object({
 
 api.post("/register", zValidator("json", RegisterSchema), async (c) => {
   const payload = c.req.valid("json");
-  const pg: Pool | undefined = (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
+  const pg: Pool | undefined =
+    (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
   if (!pg) throw new HTTPException(500, { message: "数据库连接缺失" });
   const store = new AuthStore(pg);
 
   // 简化：使用明文密码哈希存储，请在生产环境替换为 bcrypt/scrypt
   const hash = await simpleHash(payload.password);
-  const user = await store.createUser(payload.email, hash, { username: payload.username });
+  const user = await store.createUser(payload.email, hash, {
+    username: payload.username,
+  });
   // 默认授予基本角色
   await store.assignRoleToUser(user.id, "user");
   await store.grantPermissionToRole("user", "store:get");
@@ -37,7 +40,8 @@ api.post("/register", zValidator("json", RegisterSchema), async (c) => {
 
 api.post("/login", zValidator("json", LoginSchema), async (c) => {
   const payload = c.req.valid("json");
-  const pg: Pool | undefined = (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
+  const pg: Pool | undefined =
+    (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
   if (!pg) throw new HTTPException(500, { message: "数据库连接缺失" });
   const store = new AuthStore(pg);
   const user = await store.findUserByEmail(payload.email);
@@ -49,10 +53,12 @@ api.post("/login", zValidator("json", LoginSchema), async (c) => {
 });
 
 api.post("/logout", async (c) => {
-  const authHeader = c.req.header("authorization") || c.req.header("Authorization");
+  const authHeader =
+    c.req.header("authorization") || c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return c.json({ ok: true });
   const token = authHeader.slice("Bearer ".length).trim();
-  const pg: Pool | undefined = (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
+  const pg: Pool | undefined =
+    (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
   if (!pg) throw new HTTPException(500, { message: "数据库连接缺失" });
   const store = new AuthStore(pg);
   await store.revokeSession(token);
@@ -73,7 +79,10 @@ async function simpleHash(password: string): Promise<string> {
   return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function verifySimpleHash(password: string, hash: string): Promise<boolean> {
+async function verifySimpleHash(
+  password: string,
+  hash: string
+): Promise<boolean> {
   const h = await simpleHash(password);
   return h === hash;
 }

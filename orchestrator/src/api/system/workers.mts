@@ -36,7 +36,9 @@ export function registerWorkerRoutes(app: Hono): void {
   app.get("/workers/:workerId/health", (c) => {
     const registry = c.get("workerRegistry");
     const workerId = c.req.param("workerId");
-    const worker = registry.getWorkers().find((w: any) => w.workerId === workerId);
+    const worker = registry
+      .getWorkers()
+      .find((w: any) => w.workerId === workerId);
     if (!worker) return c.json({ error: "Worker not found" }, 404);
     return c.json({ workerId, status: worker.status });
   });
@@ -48,11 +50,18 @@ export function registerWorkerRoutes(app: Hono): void {
       const workerId = c.req.param("workerId");
       const registry = c.get("workerRegistry");
       // 可选更新：若存在 touch/updateHeartbeat 方法则调用
-      const maybeTouch = (registry as any).touchWorker || (registry as any).updateHeartbeat;
+      const maybeTouch =
+        (registry as any).touchWorker || (registry as any).updateHeartbeat;
       if (typeof maybeTouch === "function") {
-        try { maybeTouch.call(registry, workerId); } catch {}
+        try {
+          maybeTouch.call(registry, workerId);
+        } catch {}
       }
-      return c.json({ ok: true, workerId, timestamp: new Date().toISOString() });
+      return c.json({
+        ok: true,
+        workerId,
+        timestamp: new Date().toISOString(),
+      });
     } catch (error) {
       logger.warn("Worker heartbeat handling failed:", error);
       return c.json({ ok: false }, 200);

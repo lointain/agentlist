@@ -1,29 +1,29 @@
 // 限流中间件 - 多租户限流和优先级控制
 // 基于令牌桶算法实现
 
-import type { MiddlewareHandler } from 'hono';
-import Redis from 'ioredis';
+import type { MiddlewareHandler } from "hono";
+import Redis from "ioredis";
 
 export interface RateLimitConfig {
   // 基础配置
-  capacity: number;           // 桶容量
-  refillRate: number;         // 每秒补充令牌数
-  windowMs: number;           // 时间窗口（毫秒）
-  
+  capacity: number; // 桶容量
+  refillRate: number; // 每秒补充令牌数
+  windowMs: number; // 时间窗口（毫秒）
+
   // 多租户配置
-  keyGenerator: (c: any) => string;  // 生成限流键的函数
-  
+  keyGenerator: (c: any) => string; // 生成限流键的函数
+
   // Redis 配置（可选，用于跨实例共享）
   redis?: Redis;
-  
+
   // 响应配置
   message?: string;
   statusCode?: number;
   headers?: Record<string, string>;
-  
+
   // 跳过条件
   skip?: (c: any) => boolean;
-  
+
   // 优先级配置
   priorityLevels?: Record<string, { capacity: number; refillRate: number }>;
 }
@@ -41,7 +41,7 @@ export class MemoryTokenBucketManager {
 
   getBucket(key: string, capacity: number, refillRate: number): TokenBucket {
     let bucket = this.buckets.get(key);
-    
+
     if (!bucket) {
       bucket = {
         tokens: capacity,
@@ -58,21 +58,21 @@ export class MemoryTokenBucketManager {
   consumeToken(key: string, capacity: number, refillRate: number): boolean {
     const bucket = this.getBucket(key, capacity, refillRate);
     const now = Date.now();
-    
+
     // 计算需要补充的令牌数
     const elapsed = (now - bucket.lastRefill) / 1000;
     const tokensToAdd = elapsed * refillRate;
-    
+
     // 更新令牌数（不超过容量）
     bucket.tokens = Math.min(capacity, bucket.tokens + tokensToAdd);
     bucket.lastRefill = now;
-    
+
     // 尝试消费令牌
     if (bucket.tokens >= 1) {
       bucket.tokens -= 1;
       return true;
     }
-    
+
     return false;
   }
 
@@ -92,8 +92,8 @@ export class RedisTokenBucketManager {
   constructor(private readonly redis: Redis) {}
 
   async consumeToken(
-    key: string, 
-    capacity: number, 
+    key: string,
+    capacity: number,
     refillRate: number
   ): Promise<boolean> {
     const script = `
@@ -144,7 +144,7 @@ export function createRateLimit(config: RateLimitConfig): MiddlewareHandler {
     refillRate,
     keyGenerator,
     redis,
-    message = 'Too Many Requests',
+    message = "Too Many Requests",
     statusCode = 429,
     headers = {},
     skip,
@@ -152,7 +152,7 @@ export function createRateLimit(config: RateLimitConfig): MiddlewareHandler {
   } = config;
 
   // 选择令牌桶管理器
-  const bucketManager = redis 
+  const bucketManager = redis
     ? new RedisTokenBucketManager(redis)
     : new MemoryTokenBucketManager();
 
@@ -172,21 +172,21 @@ export function createRateLimit(config: RateLimitConfig): MiddlewareHandler {
 
     // 生成限流键
     const key = keyGenerator(c);
-    
+
     // 获取优先级配置
-    const priority = c.get('priority') || 'default';
+    const priority = c.get("priority") || "default";
     const priorityConfig = priorityLevels[priority] || { capacity, refillRate };
 
     // 尝试消费令牌
     const allowed = redis
       ? await (bucketManager as RedisTokenBucketManager).consumeToken(
-          key, 
-          priorityConfig.capacity, 
+          key,
+          priorityConfig.capacity,
           priorityConfig.refillRate
         )
       : (bucketManager as MemoryTokenBucketManager).consumeToken(
-          key, 
-          priorityConfig.capacity, 
+          key,
+          priorityConfig.capacity,
           priorityConfig.refillRate
         );
 
@@ -195,12 +195,12 @@ export function createRateLimit(config: RateLimitConfig): MiddlewareHandler {
       Object.entries(headers).forEach(([name, value]) => {
         c.header(name, value);
       });
-      
+
       // 添加限流信息头
-      c.header('X-RateLimit-Limit', priorityConfig.capacity.toString());
-      c.header('X-RateLimit-Remaining', '0');
-      c.header('X-RateLimit-Reset', (Date.now() + 1000).toString());
-      
+      c.header("X-RateLimit-Limit", priorityConfig.capacity.toString());
+      c.header("X-RateLimit-Remaining", "0");
+      c.header("X-RateLimit-Reset", (Date.now() + 1000).toString());
+
       return c.text(message, statusCode);
     }
 
@@ -212,85 +212,95 @@ export function createRateLimit(config: RateLimitConfig): MiddlewareHandler {
 
 // 基于用户 ID 的限流
 export const userRateLimit = (
-  capacity: number = 100, 
+  capacity: number = 100,
   refillRate: number = 20,
   redis?: Redis
-) => createRateLimit({
-  capacity,
-  refillRate,
-  windowMs: 60000,
-  keyGenerator: (c) => {
-    const userId = c.get('userId') || c.req.header('x-user-id') || 'anonymous';
-    return `rate_limit:user:${userId}`;
-  },
-  redis,
-  priorityLevels: {
-    'premium': { capacity: capacity * 2, refillRate: refillRate * 2 },
-    'standard': { capacity, refillRate },
-    'basic': { capacity: Math.floor(capacity / 2), refillRate: Math.floor(refillRate / 2) },
-  },
-});
+) =>
+  createRateLimit({
+    capacity,
+    refillRate,
+    windowMs: 60000,
+    keyGenerator: (c) => {
+      const userId =
+        c.get("userId") || c.req.header("x-user-id") || "anonymous";
+      return `rate_limit:user:${userId}`;
+    },
+    redis,
+    priorityLevels: {
+      premium: { capacity: capacity * 2, refillRate: refillRate * 2 },
+      standard: { capacity, refillRate },
+      basic: {
+        capacity: Math.floor(capacity / 2),
+        refillRate: Math.floor(refillRate / 2),
+      },
+    },
+  });
 
 // 基于租户 ID 的限流
 export const tenantRateLimit = (
-  capacity: number = 1000, 
+  capacity: number = 1000,
   refillRate: number = 100,
   redis?: Redis
-) => createRateLimit({
-  capacity,
-  refillRate,
-  windowMs: 60000,
-  keyGenerator: (c) => {
-    const tenantId = c.get('tenantId') || c.req.header('x-tenant-id') || 'default';
-    return `rate_limit:tenant:${tenantId}`;
-  },
-  redis,
-});
+) =>
+  createRateLimit({
+    capacity,
+    refillRate,
+    windowMs: 60000,
+    keyGenerator: (c) => {
+      const tenantId =
+        c.get("tenantId") || c.req.header("x-tenant-id") || "default";
+      return `rate_limit:tenant:${tenantId}`;
+    },
+    redis,
+  });
 
 // 基于 IP 的限流
 export const ipRateLimit = (
-  capacity: number = 200, 
+  capacity: number = 200,
   refillRate: number = 50,
   redis?: Redis
-) => createRateLimit({
-  capacity,
-  refillRate,
-  windowMs: 60000,
-  keyGenerator: (c) => {
-    const ip = c.req.header('x-forwarded-for') || 
-               c.req.header('x-real-ip') || 
-               'unknown';
-    return `rate_limit:ip:${ip}`;
-  },
-  redis,
-});
+) =>
+  createRateLimit({
+    capacity,
+    refillRate,
+    windowMs: 60000,
+    keyGenerator: (c) => {
+      const ip =
+        c.req.header("x-forwarded-for") ||
+        c.req.header("x-real-ip") ||
+        "unknown";
+      return `rate_limit:ip:${ip}`;
+    },
+    redis,
+  });
 
 // 基于 API 端点的限流
 export const endpointRateLimit = (
-  capacity: number = 500, 
+  capacity: number = 500,
   refillRate: number = 100,
   redis?: Redis
-) => createRateLimit({
-  capacity,
-  refillRate,
-  windowMs: 60000,
-  keyGenerator: (c) => {
-    const method = c.req.method;
-    const path = c.req.path;
-    return `rate_limit:endpoint:${method}:${path}`;
-  },
-  redis,
-});
+) =>
+  createRateLimit({
+    capacity,
+    refillRate,
+    windowMs: 60000,
+    keyGenerator: (c) => {
+      const method = c.req.method;
+      const path = c.req.path;
+      return `rate_limit:endpoint:${method}:${path}`;
+    },
+    redis,
+  });
 
 // 组合限流中间件
 export function createMultiLevelRateLimit(redis?: Redis) {
   return [
     // IP 级别限流（最宽松）
     ipRateLimit(1000, 200, redis),
-    
+
     // 租户级别限流
     tenantRateLimit(500, 100, redis),
-    
+
     // 用户级别限流（最严格）
     userRateLimit(100, 20, redis),
   ];

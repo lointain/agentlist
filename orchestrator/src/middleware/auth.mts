@@ -22,15 +22,19 @@ export function ensureAuth(options?: { exempt?: string[] }): MiddlewareHandler {
     const isExempt = exempt.some((p) => matchPath(path, p));
     if (isExempt) return next();
 
-    const authHeader = c.req.header("authorization") || c.req.header("Authorization");
+    const authHeader =
+      c.req.header("authorization") || c.req.header("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       throw new HTTPException(401, { message: "缺少认证令牌" });
     }
     const token = authHeader.slice("Bearer ".length).trim();
 
-    const pg: Pool | undefined = (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
+    const pg: Pool | undefined =
+      (c.var.postgres as any)?.pool ?? (c.get("postgres") as any)?.pool;
     if (!pg) {
-      throw new HTTPException(500, { message: "认证系统未初始化（数据库连接缺失）" });
+      throw new HTTPException(500, {
+        message: "认证系统未初始化（数据库连接缺失）",
+      });
     }
     const store = new AuthStore(pg);
     const session = await store.getSession(token);
@@ -49,7 +53,11 @@ export function requirePermission(c: any, permission: string): void {
   if (!auth) {
     throw new HTTPException(401, { message: "未认证" });
   }
-  if (!auth.scopes.includes(permission) && !auth.scopes.includes("*") && !auth.scopes.includes(permission.replace(/:.+$/, ":*"))) {
+  if (
+    !auth.scopes.includes(permission) &&
+    !auth.scopes.includes("*") &&
+    !auth.scopes.includes(permission.replace(/:.+$/, ":*"))
+  ) {
     throw new HTTPException(403, { message: `权限不足：需要 ${permission}` });
   }
 }

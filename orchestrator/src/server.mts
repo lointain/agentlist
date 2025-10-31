@@ -13,7 +13,11 @@ import crypto from "node:crypto";
 
 // 存储与队列适配器
 import { PostgresAdapter } from "./storage/postgres.mts";
-import { RedisStreamManager, RedisLockManager, RedisCancellationManager } from "./storage/redis-streams.mts";
+import {
+  RedisStreamManager,
+  RedisLockManager,
+  RedisCancellationManager,
+} from "./storage/redis-streams.mts";
 
 // Worker 管理
 import { WorkerRegistry } from "./worker/registry.mts";
@@ -197,19 +201,35 @@ export class AgentListServer {
   async start(): Promise<void> {
     await this.registerConfiguredWorkers();
     this.workerRegistry.startHealthCheck();
-    serve({ fetch: this.app.fetch, port: this.config.port, hostname: this.config.host });
-    logger.info(`Orchestrator started at ${this.config.host}:${this.config.port}`);
-    logger.info(`Database: ${this.config.databaseUrl.replace(/\/\/.*@/, "//***@")}`);
+    serve({
+      fetch: this.app.fetch,
+      port: this.config.port,
+      hostname: this.config.host,
+    });
+    logger.info(
+      `Orchestrator started at ${this.config.host}:${this.config.port}`
+    );
+    logger.info(
+      `Database: ${this.config.databaseUrl.replace(/\/\/.*@/, "//***@")}`
+    );
     logger.info(`Redis: ${this.config.redisUrl.replace(/\/\/.*@/, "//***@")}`);
   }
 
   // 停止服务（关闭连接）
   async stop(): Promise<void> {
     this.workerRegistry.stopHealthCheck();
-    try { await this.postgresAdapter.close(); } catch {}
-    try { await this.redisStreamManager.close(); } catch {}
-    try { await this.redisLockManager.close(); } catch {}
-    try { await this.redisCancellationManager.close(); } catch {}
+    try {
+      await this.postgresAdapter.close();
+    } catch {}
+    try {
+      await this.redisStreamManager.close();
+    } catch {}
+    try {
+      await this.redisLockManager.close();
+    } catch {}
+    try {
+      await this.redisCancellationManager.close();
+    } catch {}
     logger.info("Orchestrator stopped");
   }
 
@@ -217,8 +237,18 @@ export class AgentListServer {
   private async registerConfiguredWorkers(): Promise<void> {
     const jsUrl = process.env.WORKER_JS_URL || this.config.workers.js;
     const pyUrl = process.env.WORKER_PY_URL || this.config.workers.python;
-    if (jsUrl) this.workerRegistry.registerWorker({ workerId: "worker-js", workerType: "js", url: jsUrl });
-    if (pyUrl) this.workerRegistry.registerWorker({ workerId: "worker-py", workerType: "python", url: pyUrl });
+    if (jsUrl)
+      this.workerRegistry.registerWorker({
+        workerId: "worker-js",
+        workerType: "js",
+        url: jsUrl,
+      });
+    if (pyUrl)
+      this.workerRegistry.registerWorker({
+        workerId: "worker-py",
+        workerType: "python",
+        url: pyUrl,
+      });
   }
 }
 
@@ -248,9 +278,8 @@ export async function main(): Promise<void> {
 
 // 如果直接运行此文件，启动服务器
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(error => {
-    logger.error('Failed to start server:', error);
+  main().catch((error) => {
+    logger.error("Failed to start server:", error);
     process.exit(1);
   });
 }
-

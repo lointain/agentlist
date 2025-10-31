@@ -1,7 +1,7 @@
 // Redis Streams 适配器 - 用于事件流和跨实例通信
 // 基于 13-多用户高并发与持久化优化报告.md 的设计
 
-import Redis from 'ioredis';
+import Redis from "ioredis";
 
 export interface RedisStreamsConfig {
   url: string;
@@ -37,7 +37,7 @@ export class RedisStreamManager {
       enableReadyCheck: true,
       lazyConnect: true,
     });
-    this.keyPrefix = config.keyPrefix ?? 'agentlist';
+    this.keyPrefix = config.keyPrefix ?? "agentlist";
   }
 
   async close(): Promise<void> {
@@ -56,10 +56,13 @@ export class RedisStreamManager {
     // 使用 XADD 添加事件到流，自动生成 ID
     const eventId = await this.redis.xadd(
       streamKey,
-      '*', // 自动生成时间戳 ID
-      'event', eventData.event,
-      'data', eventData.data,
-      'timestamp', eventData.timestamp
+      "*", // 自动生成时间戳 ID
+      "event",
+      eventData.event,
+      "data",
+      eventData.data,
+      "timestamp",
+      eventData.timestamp
     );
 
     // 设置流的过期时间（24小时），避免内存泄漏
@@ -70,7 +73,7 @@ export class RedisStreamManager {
 
   // 消费事件流 - 替代 StreamManagerImpl.join
   async *consume(
-    runId: string, 
+    runId: string,
     options: {
       startId?: string;
       batchSize?: number;
@@ -78,7 +81,7 @@ export class RedisStreamManager {
     } = {}
   ): AsyncGenerator<StreamEvent> {
     const streamKey = this.getStreamKey(runId);
-    const startId = options.startId ?? '0'; // 从头开始或指定位置
+    const startId = options.startId ?? "0"; // 从头开始或指定位置
     const batchSize = options.batchSize ?? 100;
     const blockTime = options.blockTime ?? 1000; // 1秒阻塞
 
@@ -88,9 +91,13 @@ export class RedisStreamManager {
       try {
         // 使用 XREAD 读取流事件
         const result = await this.redis.xread(
-          'COUNT', batchSize,
-          'BLOCK', blockTime,
-          'STREAMS', streamKey, lastId
+          "COUNT",
+          batchSize,
+          "BLOCK",
+          blockTime,
+          "STREAMS",
+          streamKey,
+          lastId
         );
 
         if (!result || result.length === 0) {
@@ -98,7 +105,7 @@ export class RedisStreamManager {
         }
 
         const [, events] = result[0];
-        
+
         for (const [eventId, fields] of events) {
           const eventData: Record<string, string> = {};
           for (let i = 0; i < fields.length; i += 2) {
@@ -118,14 +125,14 @@ export class RedisStreamManager {
       } catch (error) {
         console.error(`Error consuming stream for run ${runId}:`, error);
         // 短暂等待后重试
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
   }
 
   // 获取流的历史事件 - 用于断连重连
   async getHistory(
-    runId: string, 
+    runId: string,
     options: {
       startId?: string;
       endId?: string;
@@ -133,12 +140,18 @@ export class RedisStreamManager {
     } = {}
   ): Promise<StreamEvent[]> {
     const streamKey = this.getStreamKey(runId);
-    const startId = options.startId ?? '-'; // 从最早开始
-    const endId = options.endId ?? '+';     // 到最新结束
+    const startId = options.startId ?? "-"; // 从最早开始
+    const endId = options.endId ?? "+"; // 到最新结束
     const count = options.count ?? 1000;
 
-    const result = await this.redis.xrange(streamKey, startId, endId, 'COUNT', count);
-    
+    const result = await this.redis.xrange(
+      streamKey,
+      startId,
+      endId,
+      "COUNT",
+      count
+    );
+
     return result.map(([eventId, fields]) => {
       const eventData: Record<string, string> = {};
       for (let i = 0; i < fields.length; i += 2) {
@@ -157,17 +170,23 @@ export class RedisStreamManager {
 
   // 创建消费者组 - 用于多实例负载均衡
   async createConsumerGroup(
-    runId: string, 
-    groupName: string, 
-    startId: string = '$'
+    runId: string,
+    groupName: string,
+    startId: string = "$"
   ): Promise<void> {
     const streamKey = this.getStreamKey(runId);
-    
+
     try {
-      await this.redis.xgroup('CREATE', streamKey, groupName, startId, 'MKSTREAM');
+      await this.redis.xgroup(
+        "CREATE",
+        streamKey,
+        groupName,
+        startId,
+        "MKSTREAM"
+      );
     } catch (error: any) {
       // 忽略 "BUSYGROUP Consumer Group name already exists" 错误
-      if (!error.message.includes('BUSYGROUP')) {
+      if (!error.message.includes("BUSYGROUP")) {
         throw error;
       }
     }
@@ -179,7 +198,12 @@ export class RedisStreamManager {
     options: StreamConsumerOptions
   ): AsyncGenerator<StreamEvent> {
     const streamKey = this.getStreamKey(runId);
-    const { groupName, consumerName, batchSize = 10, blockTime = 1000 } = options;
+    const {
+      groupName,
+      consumerName,
+      batchSize = 10,
+      blockTime = 1000,
+    } = options;
 
     // 确保消费者组存在
     await this.createConsumerGroup(runId, groupName);
@@ -188,10 +212,16 @@ export class RedisStreamManager {
       try {
         // 使用 XREADGROUP 读取分组事件
         const result = await this.redis.xreadgroup(
-          'GROUP', groupName, consumerName,
-          'COUNT', batchSize,
-          'BLOCK', blockTime,
-          'STREAMS', streamKey, '>'
+          "GROUP",
+          groupName,
+          consumerName,
+          "COUNT",
+          batchSize,
+          "BLOCK",
+          blockTime,
+          "STREAMS",
+          streamKey,
+          ">"
         );
 
         if (!result || result.length === 0) {
@@ -199,7 +229,7 @@ export class RedisStreamManager {
         }
 
         const [, events] = result[0];
-        
+
         for (const [eventId, fields] of events) {
           const eventData: Record<string, string> = {};
           for (let i = 0; i < fields.length; i += 2) {
@@ -220,8 +250,11 @@ export class RedisStreamManager {
           await this.redis.xack(streamKey, groupName, eventId);
         }
       } catch (error) {
-        console.error(`Error consuming stream with group for run ${runId}:`, error);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.error(
+          `Error consuming stream with group for run ${runId}:`,
+          error
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
   }
@@ -236,7 +269,7 @@ export class RedisStreamManager {
   // 获取流信息
   async getStreamInfo(runId: string): Promise<any> {
     const streamKey = this.getStreamKey(runId);
-    return await this.redis.xinfo('STREAM', streamKey);
+    return await this.redis.xinfo("STREAM", streamKey);
   }
 
   // 删除流
@@ -246,20 +279,22 @@ export class RedisStreamManager {
   }
 
   // 清理过期流 - 定期清理任务
-  async cleanupExpiredStreams(maxAge: number = 24 * 60 * 60 * 1000): Promise<number> {
+  async cleanupExpiredStreams(
+    maxAge: number = 24 * 60 * 60 * 1000
+  ): Promise<number> {
     const pattern = `${this.keyPrefix}:stream:*`;
     const keys = await this.redis.keys(pattern);
     let deletedCount = 0;
 
     for (const key of keys) {
       try {
-        const info = await this.redis.xinfo('STREAM', key);
-        const lastEntryId = info[info.indexOf('last-entry') + 1]?.[0];
-        
+        const info = await this.redis.xinfo("STREAM", key);
+        const lastEntryId = info[info.indexOf("last-entry") + 1]?.[0];
+
         if (lastEntryId) {
-          const timestamp = parseInt(lastEntryId.split('-')[0], 10);
+          const timestamp = parseInt(lastEntryId.split("-")[0], 10);
           const age = Date.now() - timestamp;
-          
+
           if (age > maxAge) {
             await this.redis.del(key);
             deletedCount++;
@@ -286,7 +321,7 @@ export class RedisLockManager {
 
   constructor(config: RedisStreamsConfig) {
     this.redis = new Redis(config.url);
-    this.keyPrefix = config.keyPrefix ?? 'agentlist';
+    this.keyPrefix = config.keyPrefix ?? "agentlist";
   }
 
   async close(): Promise<void> {
@@ -295,7 +330,7 @@ export class RedisLockManager {
 
   // 获取分布式锁
   async acquireLock(
-    runId: string, 
+    runId: string,
     ttl: number = 30000, // 30秒 TTL
     retryDelay: number = 100
   ): Promise<string | null> {
@@ -303,19 +338,19 @@ export class RedisLockManager {
     const lockValue = `${Date.now()}-${Math.random()}`;
 
     // 使用 SET NX EX 原子操作获取锁
-    const result = await this.redis.set(lockKey, lockValue, 'PX', ttl, 'NX');
-    
-    if (result === 'OK') {
+    const result = await this.redis.set(lockKey, lockValue, "PX", ttl, "NX");
+
+    if (result === "OK") {
       return lockValue;
     }
-    
+
     return null;
   }
 
   // 释放分布式锁
   async releaseLock(runId: string, lockValue: string): Promise<boolean> {
     const lockKey = this.getLockKey(runId);
-    
+
     // 使用 Lua 脚本确保原子性释放
     const script = `
       if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -324,7 +359,7 @@ export class RedisLockManager {
         return 0
       end
     `;
-    
+
     const result = await this.redis.eval(script, 1, lockKey, lockValue);
     return result === 1;
   }
@@ -337,9 +372,13 @@ export class RedisLockManager {
   }
 
   // 续期锁
-  async renewLock(runId: string, lockValue: string, ttl: number = 30000): Promise<boolean> {
+  async renewLock(
+    runId: string,
+    lockValue: string,
+    ttl: number = 30000
+  ): Promise<boolean> {
     const lockKey = this.getLockKey(runId);
-    
+
     const script = `
       if redis.call("GET", KEYS[1]) == ARGV[1] then
         return redis.call("PEXPIRE", KEYS[1], ARGV[2])
@@ -347,7 +386,7 @@ export class RedisLockManager {
         return 0
       end
     `;
-    
+
     const result = await this.redis.eval(script, 1, lockKey, lockValue, ttl);
     return result === 1;
   }
@@ -364,7 +403,7 @@ export class RedisCancellationManager {
 
   constructor(config: RedisStreamsConfig) {
     this.redis = new Redis(config.url);
-    this.keyPrefix = config.keyPrefix ?? 'agentlist';
+    this.keyPrefix = config.keyPrefix ?? "agentlist";
   }
 
   async close(): Promise<void> {
@@ -372,10 +411,13 @@ export class RedisCancellationManager {
   }
 
   // 发送取消信号
-  async sendCancelSignal(runId: string, action: string = 'interrupt'): Promise<void> {
+  async sendCancelSignal(
+    runId: string,
+    action: string = "interrupt"
+  ): Promise<void> {
     const cancelKey = this.getCancelKey(runId);
     await this.redis.setex(cancelKey, 300, action); // 5分钟过期
-    
+
     // 同时发布到 Pub/Sub 频道，用于实时通知
     const channel = this.getCancelChannel(runId);
     await this.redis.publish(channel, action);
@@ -395,15 +437,15 @@ export class RedisCancellationManager {
 
   // 订阅取消信号 - 用于实时响应
   async subscribeCancelSignal(
-    runId: string, 
+    runId: string,
     callback: (action: string) => void
   ): Promise<() => void> {
     const subscriber = new Redis(this.redis.options);
     const channel = this.getCancelChannel(runId);
-    
+
     await subscriber.subscribe(channel);
-    
-    subscriber.on('message', (receivedChannel, message) => {
+
+    subscriber.on("message", (receivedChannel, message) => {
       if (receivedChannel === channel) {
         callback(message);
       }

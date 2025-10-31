@@ -1,21 +1,25 @@
 // PostgreSQL 存储适配器 - 高并发优化版本
 // 基于 13-多用户高并发与持久化优化报告.md 的设计
 
-import { Pool, PoolClient } from 'pg';
+import { Pool, PoolClient } from "pg";
 // 引入 Drizzle ORM（Node-Postgres 驱动）与表结构
-import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { eq, and, sql, inArray } from 'drizzle-orm';
-import { assistants as tblAssistants, threads as tblThreads, runs as tblRuns } from './schema.mts';
-import type { 
-  RunsRepo, 
-  ThreadsRepo, 
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { eq, and, sql, inArray } from "drizzle-orm";
+import {
+  assistants as tblAssistants,
+  threads as tblThreads,
+  runs as tblRuns,
+} from "./schema.mts";
+import type {
+  RunsRepo,
+  ThreadsRepo,
   AssistantsRepo,
-  Run, 
-  Thread, 
+  Run,
+  Thread,
   Assistant,
-  RunnableConfig, 
-  Metadata 
-} from '../storage/types.mts';
+  RunnableConfig,
+  Metadata,
+} from "../storage/types.mts";
 
 export interface PostgresConfig {
   connectionString: string;
@@ -62,17 +66,20 @@ export class PostgresAdapter {
 
 // PostgreSQL Runs 实现 - 支持高并发调度
 export class PostgresRuns implements RunsRepo {
-  constructor(private readonly pool: Pool, private readonly db: NodePgDatabase) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly db: NodePgDatabase
+  ) {}
 
   // 幂等插入：利用唯一索引 (run_id) + UPSERT
   async put(
     runId: string,
     assistantId: string,
     kwargs: any,
-    options: { 
-      threadId?: string; 
-      status?: string; 
-      metadata?: Metadata; 
+    options: {
+      threadId?: string;
+      status?: string;
+      metadata?: Metadata;
       afterSeconds?: number;
       multitaskStrategy?: string;
       ifNotExists?: boolean;
@@ -85,7 +92,7 @@ export class PostgresRuns implements RunsRepo {
         .insert(tblThreads)
         .values({
           thread_id: options.threadId,
-          status: 'idle',
+          status: "idle",
           config: {},
           metadata: options.metadata ?? {},
           created_at: new Date(),
@@ -106,7 +113,7 @@ export class PostgresRuns implements RunsRepo {
     }
 
     // 3) 多任务策略：reject 时检测该线程是否已有在途任务（保持原生 SQL，性能更优）
-    if (options.multitaskStrategy === 'reject' && options.threadId) {
+    if (options.multitaskStrategy === "reject" && options.threadId) {
       const runningRuns = await this.pool.query(
         `SELECT run_id FROM runs 
          WHERE thread_id = $1 AND status IN ('pending', 'running')`,
@@ -128,7 +135,7 @@ export class PostgresRuns implements RunsRepo {
         run_id: runId,
         thread_id: options.threadId!,
         assistant_id: assistantId,
-        status: options.status ?? 'pending',
+        status: options.status ?? "pending",
         kwargs: kwargs ?? {},
         metadata: options.metadata ?? {},
         scheduled_at,
@@ -138,7 +145,7 @@ export class PostgresRuns implements RunsRepo {
       .onConflictDoUpdate({
         target: tblRuns.run_id,
         set: {
-          status: options.status ?? 'pending',
+          status: options.status ?? "pending",
           kwargs: kwargs ?? {},
           metadata: options.metadata ?? {},
           updated_at: new Date(),
@@ -150,16 +157,16 @@ export class PostgresRuns implements RunsRepo {
   }
 
   // 安全调度：一次性锁定一批待处理 run，避免多工作者抢占
-  async *next(): AsyncGenerator<{ 
-    run: Run; 
-    attempt: number; 
-    signal: AbortSignal 
+  async *next(): AsyncGenerator<{
+    run: Run;
+    attempt: number;
+    signal: AbortSignal;
   }> {
     while (true) {
       const client = await this.pool.connect();
       try {
-        await client.query('BEGIN');
-        
+        await client.query("BEGIN");
+
         // 使用 SKIP LOCKED 避免锁等待，提升并发调度
         const res = await client.query(
           `SELECT r.*, a.graph_id, a.config as assistant_config
@@ -178,16 +185,16 @@ export class PostgresRuns implements RunsRepo {
         );
 
         if (res.rowCount === 0) {
-          await client.query('COMMIT');
+          await client.query("COMMIT");
           client.release();
           // 空闲等待一段时间再尝试
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           continue;
         }
 
         for (const row of res.rows) {
           const runId = row.run_id as string;
-          
+
           // 将状态置为 running，增加 attempt
           await client.query(
             `UPDATE runs SET 
@@ -199,31 +206,31 @@ export class PostgresRuns implements RunsRepo {
             [runId]
           );
 
-          await client.query('COMMIT');
-          
+          await client.query("COMMIT");
+
           // 创建取消信号（实际应用中可用 Redis Pub/Sub 等跨进程机制）
           const controller = new AbortController();
-          
-          yield { 
+
+          yield {
             run: {
               run_id: runId,
               thread_id: row.thread_id,
               assistant_id: row.assistant_id,
-              status: 'running',
+              status: "running",
               kwargs: row.kwargs,
               metadata: row.metadata,
               graph_id: row.graph_id,
               config: row.assistant_config,
               attempt: row.attempt + 1,
               created_at: row.created_at,
-              updated_at: new Date()
-            } as Run, 
-            attempt: row.attempt + 1, 
-            signal: controller.signal 
+              updated_at: new Date(),
+            } as Run,
+            attempt: row.attempt + 1,
+            signal: controller.signal,
           };
         }
       } catch (e) {
-        await client.query('ROLLBACK');
+        await client.query("ROLLBACK");
         throw e;
       } finally {
         client.release();
@@ -270,24 +277,28 @@ export class PostgresRuns implements RunsRepo {
   }
 
   async updateStatus(
-    runId: string, 
-    status: string, 
+    runId: string,
+    status: string,
     metadata?: Metadata
   ): Promise<void> {
-    const updateFields = ['status = $2', 'updated_at = NOW()'];
+    const updateFields = ["status = $2", "updated_at = NOW()"];
     const values = [runId, status];
-    
+
     if (metadata) {
-      updateFields.push('metadata = $3');
+      updateFields.push("metadata = $3");
       values.push(JSON.stringify(metadata));
     }
-    
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-      updateFields.push('completed_at = NOW()');
+
+    if (
+      status === "completed" ||
+      status === "failed" ||
+      status === "cancelled"
+    ) {
+      updateFields.push("completed_at = NOW()");
     }
 
     await this.pool.query(
-      `UPDATE runs SET ${updateFields.join(', ')} WHERE run_id = $1`,
+      `UPDATE runs SET ${updateFields.join(", ")} WHERE run_id = $1`,
       values
     );
   }
@@ -320,9 +331,10 @@ export class PostgresRuns implements RunsRepo {
       values.push(options.status);
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : '';
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : '';
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
+    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
 
     if (options.limit) values.push(options.limit);
     if (options.offset) values.push(options.offset);
@@ -337,7 +349,7 @@ export class PostgresRuns implements RunsRepo {
       values
     );
 
-    return res.rows.map(row => ({
+    return res.rows.map((row) => ({
       run_id: row.run_id,
       thread_id: row.thread_id,
       assistant_id: row.assistant_id,
@@ -348,11 +360,14 @@ export class PostgresRuns implements RunsRepo {
       config: row.assistant_config,
       attempt: row.attempt,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     })) as Run[];
   }
 
-  private async getRunsByThread(threadId: string, client?: PoolClient): Promise<Run[]> {
+  private async getRunsByThread(
+    threadId: string,
+    client?: PoolClient
+  ): Promise<Run[]> {
     const db = client || this.pool;
     const res = await db.query(
       `SELECT r.*, a.graph_id, a.config as assistant_config
@@ -362,8 +377,8 @@ export class PostgresRuns implements RunsRepo {
        ORDER BY r.created_at ASC`,
       [threadId]
     );
-    
-    return res.rows.map(row => ({
+
+    return res.rows.map((row) => ({
       run_id: row.run_id,
       thread_id: row.thread_id,
       assistant_id: row.assistant_id,
@@ -374,7 +389,7 @@ export class PostgresRuns implements RunsRepo {
       config: row.assistant_config,
       attempt: row.attempt,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     })) as Run[];
   }
 }
@@ -385,12 +400,12 @@ export class PostgresThreads implements ThreadsRepo {
 
   async get(threadId: string): Promise<Thread | null> {
     const res = await this.pool.query(
-      'SELECT * FROM threads WHERE thread_id = $1',
+      "SELECT * FROM threads WHERE thread_id = $1",
       [threadId]
     );
-    
+
     if (res.rowCount === 0) return null;
-    
+
     const row = res.rows[0];
     return {
       thread_id: row.thread_id,
@@ -398,7 +413,7 @@ export class PostgresThreads implements ThreadsRepo {
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     } as Thread;
   }
 
@@ -425,13 +440,13 @@ export class PostgresThreads implements ThreadsRepo {
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     } as Thread;
   }
 
   async updateStatus(threadId: string, status: string): Promise<void> {
     await this.pool.query(
-      'UPDATE threads SET status = $2, updated_at = NOW() WHERE thread_id = $1',
+      "UPDATE threads SET status = $2, updated_at = NOW() WHERE thread_id = $1",
       [threadId, status]
     );
   }
@@ -458,9 +473,10 @@ export class PostgresThreads implements ThreadsRepo {
       values.push(JSON.stringify(options.metadata));
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : '';
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : '';
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
+    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
 
     if (options.limit) values.push(options.limit);
     if (options.offset) values.push(options.offset);
@@ -470,18 +486,20 @@ export class PostgresThreads implements ThreadsRepo {
       values
     );
 
-    return res.rows.map(row => ({
+    return res.rows.map((row) => ({
       thread_id: row.thread_id,
       status: row.status,
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     })) as Thread[];
   }
 
   async delete(threadId: string): Promise<void> {
-    await this.pool.query('DELETE FROM threads WHERE thread_id = $1', [threadId]);
+    await this.pool.query("DELETE FROM threads WHERE thread_id = $1", [
+      threadId,
+    ]);
   }
 }
 
@@ -491,12 +509,12 @@ export class PostgresAssistants implements AssistantsRepo {
 
   async get(assistantId: string): Promise<Assistant | null> {
     const res = await this.pool.query(
-      'SELECT * FROM assistants WHERE id = $1',
+      "SELECT * FROM assistants WHERE id = $1",
       [assistantId]
     );
-    
+
     if (res.rowCount === 0) return null;
-    
+
     const row = res.rows[0];
     return {
       id: row.id,
@@ -506,11 +524,13 @@ export class PostgresAssistants implements AssistantsRepo {
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     } as Assistant;
   }
 
-  async put(assistant: Omit<Assistant, 'created_at' | 'updated_at'>): Promise<Assistant> {
+  async put(
+    assistant: Omit<Assistant, "created_at" | "updated_at">
+  ): Promise<Assistant> {
     const res = await this.pool.query(
       `INSERT INTO assistants(id, graph_id, name, description, config, metadata, created_at, updated_at)
        VALUES($1, $2, $3, $4, $5, $6, NOW(), NOW())
@@ -528,7 +548,7 @@ export class PostgresAssistants implements AssistantsRepo {
         assistant.name,
         assistant.description,
         JSON.stringify(assistant.config),
-        JSON.stringify(assistant.metadata)
+        JSON.stringify(assistant.metadata),
       ]
     );
 
@@ -541,7 +561,7 @@ export class PostgresAssistants implements AssistantsRepo {
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     } as Assistant;
   }
 
@@ -567,9 +587,10 @@ export class PostgresAssistants implements AssistantsRepo {
       values.push(JSON.stringify(options.metadata));
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : '';
-    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : '';
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limitClause = options.limit ? `LIMIT $${paramIndex++}` : "";
+    const offsetClause = options.offset ? `OFFSET $${paramIndex++}` : "";
 
     if (options.limit) values.push(options.limit);
     if (options.offset) values.push(options.offset);
@@ -579,7 +600,7 @@ export class PostgresAssistants implements AssistantsRepo {
       values
     );
 
-    return res.rows.map(row => ({
+    return res.rows.map((row) => ({
       id: row.id,
       graph_id: row.graph_id,
       name: row.name,
@@ -587,11 +608,13 @@ export class PostgresAssistants implements AssistantsRepo {
       config: row.config,
       metadata: row.metadata,
       created_at: row.created_at,
-      updated_at: row.updated_at
+      updated_at: row.updated_at,
     })) as Assistant[];
   }
 
   async delete(assistantId: string): Promise<void> {
-    await this.pool.query('DELETE FROM assistants WHERE id = $1', [assistantId]);
+    await this.pool.query("DELETE FROM assistants WHERE id = $1", [
+      assistantId,
+    ]);
   }
 }

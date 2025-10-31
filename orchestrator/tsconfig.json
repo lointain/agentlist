@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -13,8 +15,8 @@
     "jsx": "react-jsx",
     "noUnusedLocals": true,
     "outDir": "dist",
-    "noEmit": true,
-    "allowImportingTsExtensions": true
+    "noEmit": false,
+    "declarationMap": true
   },
   "include": ["src/**/*.ts", "src/**/*.mts", "src/**/*.tsx", "src/**/*.d.ts"],
   "exclude": ["scripts/*", "dist/*", "tests/*"]

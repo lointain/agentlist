@@ -50,7 +50,9 @@ api.post(
     requirePermission(c, "store:list_namespaces");
 
     if (!storeDb) {
-      throw new HTTPException(500, { message: "Store 未初始化（缺少 DATABASE_URL）" });
+      throw new HTTPException(500, {
+        message: "Store 未初始化（缺少 DATABASE_URL）",
+      });
     }
 
     return c.json({
@@ -76,7 +78,9 @@ api.post(
     requirePermission(c, "store:search");
 
     if (!storeDb) {
-      throw new HTTPException(500, { message: "Store 未初始化（缺少 DATABASE_URL）" });
+      throw new HTTPException(500, {
+        message: "Store 未初始化（缺少 DATABASE_URL）",
+      });
     }
 
     const items = await storeDb.search(payload.namespace_prefix, {
@@ -97,7 +101,9 @@ api.put("/store/items", zValidator("json", schemas.StorePutItem), async (c) => {
 
   requirePermission(c, "store:put");
   if (!storeDb) {
-    throw new HTTPException(500, { message: "Store 未初始化（缺少 DATABASE_URL）" });
+    throw new HTTPException(500, {
+      message: "Store 未初始化（缺少 DATABASE_URL）",
+    });
   }
   await storeDb.put(payload.namespace, payload.key, payload.value);
   return c.body(null, 204);
@@ -113,7 +119,9 @@ api.delete(
 
     requirePermission(c, "store:delete");
     if (!storeDb) {
-      throw new HTTPException(500, { message: "Store 未初始化（缺少 DATABASE_URL）" });
+      throw new HTTPException(500, {
+        message: "Store 未初始化（缺少 DATABASE_URL）",
+      });
     }
     await storeDb.delete(payload.namespace ?? [], payload.key);
     return c.body(null, 204);
@@ -132,7 +140,9 @@ api.get(
     const key = payload.key;
     const namespace = payload.namespace;
     if (!storeDb) {
-      throw new HTTPException(500, { message: "Store 未初始化（缺少 DATABASE_URL）" });
+      throw new HTTPException(500, {
+        message: "Store 未初始化（缺少 DATABASE_URL）",
+      });
     }
     return c.json(mapItemsToApi(await storeDb.get(namespace, key)));
   }

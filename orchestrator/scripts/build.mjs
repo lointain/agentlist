@@ -12,7 +12,7 @@ function $(strings) {
   });
 }
 
-await $`npx tsc --outDir dist`;
+await $`yarn tsc --outDir dist`;
 
 await $`cp src/graph/parser/schema/types.template.mts dist/src/graph/parser/schema`;
 await $`rm -rf dist/src/graph/parser/schema/types.template.mjs`;

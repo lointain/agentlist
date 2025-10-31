@@ -6,8 +6,14 @@ export function registerMetricsRoutes(app: Hono): void {
   // 队列深度（pending runs 数量）
   app.get("/metrics/queue-depth", async (c) => {
     const postgres = c.get("postgres");
-    const pendingRuns = await postgres.runs.search({ status: ["pending"], limit: 1000 });
-    return c.json({ queueDepth: pendingRuns.length, timestamp: new Date().toISOString() });
+    const pendingRuns = await postgres.runs.search({
+      status: ["pending"],
+      limit: 1000,
+    });
+    return c.json({
+      queueDepth: pendingRuns.length,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // Worker 状态聚合指标

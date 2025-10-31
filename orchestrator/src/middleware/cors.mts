@@ -60,7 +60,8 @@ export const cors = (
   if (cors.allow_methods != null) config.allowMethods = cors.allow_methods;
   if (cors.allow_headers != null) config.allowHeaders = cors.allow_headers;
   if (cors.expose_headers != null) config.exposeHeaders = cors.expose_headers;
-  if (cors.allow_credentials != null) config.credentials = cors.allow_credentials;
+  if (cors.allow_credentials != null)
+    config.credentials = cors.allow_credentials;
 
   return honoCors(config);
 };

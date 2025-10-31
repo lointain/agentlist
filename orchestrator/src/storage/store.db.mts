@@ -4,18 +4,18 @@
 // - value 使用 JSONB 存储
 // 注意：该实现为最小可用版本，满足现有 API（list/search/get/put/delete）需求
 
-import { Pool } from 'pg';
+import { Pool } from "pg";
 import type { Item } from "@langchain/langgraph";
 
 // 帮助函数：将命名空间与 key 拼接为唯一键
 const nsKey = (namespace: string[] | undefined, key: string) => {
   const ns = (namespace ?? []).filter(Boolean);
-  return ns.length ? `${ns.join('.')}.${key}` : key;
+  return ns.length ? `${ns.join(".")}.${key}` : key;
 };
 
 // 帮助函数：从扁平 key 拆回命名空间与 key
 const splitNsKey = (flatKey: string): { namespace: string[]; key: string } => {
-  const parts = flatKey.split('.');
+  const parts = flatKey.split(".");
   if (parts.length <= 1) return { namespace: [], key: flatKey };
   const key = parts.pop()!;
   return { namespace: parts, key };
@@ -47,23 +47,36 @@ export class PostgresStoreAdapter {
     const set = new Set<string>();
     for (const row of res.rows) {
       const { namespace } = splitNsKey(row.key as string);
-      if (prefix && prefix.length && !namespace.slice(0, prefix.length).every((v, i) => v === prefix[i])) {
+      if (
+        prefix &&
+        prefix.length &&
+        !namespace.slice(0, prefix.length).every((v, i) => v === prefix[i])
+      ) {
         continue;
       }
-      if (suffix && suffix.length && !namespace.slice(-suffix.length).every((v, i) => v === suffix[i])) {
+      if (
+        suffix &&
+        suffix.length &&
+        !namespace.slice(-suffix.length).every((v, i) => v === suffix[i])
+      ) {
         continue;
       }
       const trimmed = maxDepth ? namespace.slice(0, maxDepth) : namespace;
-      set.add(trimmed.join('.'));
+      set.add(trimmed.join("."));
     }
 
-    return Array.from(set).map(s => (s ? s.split('.') : []));
+    return Array.from(set).map((s) => (s ? s.split(".") : []));
   }
 
   // 搜索条目：按命名空间前缀与可选文本查询过滤
   async search(
     namespacePrefix: string[] | undefined,
-    options: { filter?: Record<string, unknown>; limit?: number; offset?: number; query?: string | null }
+    options: {
+      filter?: Record<string, unknown>;
+      limit?: number;
+      offset?: number;
+      query?: string | null;
+    }
   ): Promise<Item[]> {
     const { limit = 10, offset = 0, query } = options;
 
@@ -73,7 +86,7 @@ export class PostgresStoreAdapter {
 
     if (namespacePrefix && namespacePrefix.length) {
       where.push(`key LIKE $${params.length + 1}`);
-      params.push(`${namespacePrefix.join('.')}.%`);
+      params.push(`${namespacePrefix.join(".")}.%`);
     }
 
     if (query && query.trim().length) {
@@ -81,13 +94,15 @@ export class PostgresStoreAdapter {
       params.push(`%${query}%`);
     }
 
-    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const res = await this.pool.query(
-      `SELECT key, value, updated_at FROM store ${whereClause} ORDER BY updated_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      `SELECT key, value, updated_at FROM store ${whereClause} ORDER BY updated_at DESC LIMIT $${
+        params.length + 1
+      } OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
 
-    return res.rows.map(row => {
+    return res.rows.map((row) => {
       const { namespace, key } = splitNsKey(row.key as string);
       return {
         namespace,
@@ -101,7 +116,11 @@ export class PostgresStoreAdapter {
   }
 
   // 写入（Upsert）
-  async put(namespace: string[] | undefined, key: string, value: unknown): Promise<void> {
+  async put(
+    namespace: string[] | undefined,
+    key: string,
+    value: unknown
+  ): Promise<void> {
     const flatKey = nsKey(namespace, key);
     await this.pool.query(
       `INSERT INTO store (key, value, updated_at)
@@ -118,9 +137,15 @@ export class PostgresStoreAdapter {
   }
 
   // 获取单条
-  async get(namespace: string[] | undefined, key: string): Promise<Item | null> {
+  async get(
+    namespace: string[] | undefined,
+    key: string
+  ): Promise<Item | null> {
     const flatKey = nsKey(namespace, key);
-    const res = await this.pool.query(`SELECT key, value, updated_at FROM store WHERE key = $1`, [flatKey]);
+    const res = await this.pool.query(
+      `SELECT key, value, updated_at FROM store WHERE key = $1`,
+      [flatKey]
+    );
     if (!res.rowCount) return null;
     const row = res.rows[0];
     const { namespace: ns, key: k } = splitNsKey(row.key as string);
@@ -139,7 +164,11 @@ export class PostgresStoreAdapter {
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
   // 仅日志提示，不抛错，避免开发环境未配置时直接崩溃
-  console.warn('[PostgresStoreAdapter] DATABASE_URL 未设置，store API 将不可用');
+  console.warn(
+    "[PostgresStoreAdapter] DATABASE_URL 未设置，store API 将不可用"
+  );
 }
 
-export const storeDb = DATABASE_URL ? new PostgresStoreAdapter(DATABASE_URL) : undefined;
+export const storeDb = DATABASE_URL
+  ? new PostgresStoreAdapter(DATABASE_URL)
+  : undefined;

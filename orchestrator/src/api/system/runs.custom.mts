@@ -19,14 +19,26 @@ export function registerCustomRunsRoutes(app: Hono, databaseUrl: string): void {
       if (!assistant) return c.json({ error: "Assistant not found" }, 404);
 
       const worker = registry.selectWorker(assistant.graph_id);
-      if (!worker) return c.json({ error: `No worker for graph ${assistant.graph_id}` }, 503);
+      if (!worker)
+        return c.json(
+          { error: `No worker for graph ${assistant.graph_id}` },
+          503
+        );
 
       const runId = crypto.randomUUID();
       await postgres.runs.put(
         runId,
         assistant_id,
         { input, config },
-        { threadId, status: "pending", metadata: { ...metadata, workerId: worker.workerId, workerType: worker.workerType } }
+        {
+          threadId,
+          status: "pending",
+          metadata: {
+            ...metadata,
+            workerId: worker.workerId,
+            workerType: worker.workerType,
+          },
+        }
       );
 
       const workerClient = registry.getWorkerClient(worker.workerId);
@@ -48,14 +60,19 @@ export function registerCustomRunsRoutes(app: Hono, databaseUrl: string): void {
           });
         } catch (err) {
           logger.error(`Start run failed on worker ${worker.workerId}:`, err);
-          await postgres.runs.updateStatus(runId, "failed", { error: err instanceof Error ? err.message : "Worker error" });
+          await postgres.runs.updateStatus(runId, "failed", {
+            error: err instanceof Error ? err.message : "Worker error",
+          });
         }
       }
 
       return c.json({ run_id: runId }, 201);
     } catch (error) {
       logger.error("Failed to create run:", error);
-      return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
+      return c.json(
+        { error: error instanceof Error ? error.message : "Internal error" },
+        500
+      );
     }
   });
 
@@ -86,7 +103,10 @@ export function registerCustomRunsRoutes(app: Hono, databaseUrl: string): void {
       });
     } catch (error) {
       logger.error("Stream run events failed:", error);
-      return c.json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
+      return c.json(
+        { error: error instanceof Error ? error.message : "Internal error" },
+        500
+      );
     }
   });
 }
