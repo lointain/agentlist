@@ -43,7 +43,7 @@ import {
 } from "./graph/langgraph.config.js";
 
 // 加载环境变量
-dotenv.config({ path: "../../.env.dev" });
+dotenv.config({ path: ".//.env" });
 
 // 配置日志
 const logger = winston.createLogger({
@@ -512,12 +512,12 @@ export class AgentListWorker {
       hostname: this.config.host,
     });
 
-    logger.info(
+    console.log(
       `AgentList JS Worker started on ${this.config.host}:${this.config.port}`
     );
-    logger.info(`Worker ID: ${this.config.workerId}`);
-    logger.info(`Max Concurrency: ${this.config.maxConcurrency}`);
-    logger.info(`Capabilities: ${this.config.capabilities.graphs.join(", ")}`);
+    console.log(`Worker ID: ${this.config.workerId}`);
+    console.log(`Max Concurrency: ${this.config.maxConcurrency}`);
+    console.log(`Capabilities: ${this.config.capabilities.graphs.join(", ")}`);
 
     // 注意：start() 不返回 server，保持签名为 Promise<void>
   }
@@ -545,10 +545,14 @@ export class AgentListWorker {
 export async function startWorker(
   config?: Partial<WorkerConfig>
 ): Promise<AgentListWorker> {
+  // console.log("环境变量检查:");
+  // console.log(`process.env: ${JSON.stringify(process.env)}`);
+
   const defaultConfig: WorkerConfig = {
-    port: parseInt(process.env.WORKER_PORT || "3001"),
-    host: process.env.WORKER_HOST || "0.0.0.0",
+    port: parseInt(process.env.PORT || "3001"),
+    host: process.env.HOST || "0.0.0.0",
     workerId: process.env.WORKER_ID || `js-worker-${uuidv4()}`,
+
     serverUrl: process.env.SERVER_URL,
     maxConcurrency: parseInt(process.env.MAX_CONCURRENCY || "10"),
     heartbeatInterval: parseInt(process.env.HEARTBEAT_INTERVAL || "30000"),
@@ -562,13 +566,12 @@ export async function startWorker(
   const worker = new AgentListWorker(finalConfig);
 
   await worker.start();
+  console.log("Worker start method called.");
   return worker;
 }
 
 // 如果直接运行此文件，启动 Worker
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startWorker().catch((error) => {
-    logger.error("Failed to start worker:", error);
-    process.exit(1);
-  });
-}
+startWorker().catch((error) => {
+  logger.error("Failed to start worker:", error);
+  process.exit(1);
+});

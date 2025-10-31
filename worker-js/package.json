@@ -3,7 +3,6 @@
   "name": "agentlist-worker-js",
   "version": "1.0.0",
   "description": "AgentList JavaScript/TypeScript Worker - HTTP + SSE 协议的 LangGraph 执行器",
-  "type": "module",
   "engines": {
     "node": "^18.19.0 || >=20.16.0"
   },
@@ -19,8 +18,8 @@
   "scripts": {
     "clean": "rm -rf dist/",
     "build": "tsc",
-    "start": "tsx src/main.mts",
-    "dev": "tsx watch src/main.mts --dev",
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts --dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",
@@ -46,6 +45,7 @@
     "@types/uuid": "^10.0.0",
     "pg": "^8.16.3",
     "prettier": "^2.8.3",
+    "ts-node-dev": "^2.0.0",
     "tsx": "^4.20.6",
     "typescript": "^4.9.5 || ^5.4.5",
     "vitest": "^3.1.2"

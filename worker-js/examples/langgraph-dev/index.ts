@@ -10,8 +10,8 @@ import { Annotation, StateGraph, END } from "@langchain/langgraph";
 // 定义状态结构（最小化，仅包含 input 与 output）
 // 使用 Annotation 提供类型与可视化提示
 const State = Annotation.Root({
-  input: Annotation.string({ description: "用户输入" }),
-  output: Annotation.string({ description: "模型输出" }),
+  input: Annotation({ description: "用户输入" }),
+  output: Annotation({ description: "模型输出" }),
 });
 
 // 简单的节点：将 input 回显为 output
@@ -24,6 +24,7 @@ async function echoNode(state: { input: string; output?: string }) {
 // 构建并编译图：单节点后直接结束
 const workflow = new StateGraph(State)
   .addNode("echo", echoNode)
+  .addEdge("__start__", "echo") // 添加这一行作为图的入口点
   .addEdge("echo", END);
 
 export const graph = workflow.compile();
