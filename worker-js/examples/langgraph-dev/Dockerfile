@@ -25,6 +25,8 @@ COPY . /app/graphs/langgraph-dev
 # 安装langgraph-dev项目的依赖
 WORKDIR /app/worker-js/graphs/langgraph-dev
 RUN npm install
+    # 构建 langgraph-dev 项目
+    RUN npm run build
 
 # 回到worker-js目录并构建应用
 WORKDIR /app/worker-js
@@ -59,7 +61,8 @@ RUN touch .env && \
 WORKDIR /app/worker-js
 
 # 设置默认的图配置环境变量
-ENV LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/graphs/langgraph-dev/dist/index.js:graph"}}
+ENV LANGGRAPH_CONFIG={"graphs":{"examples-echo":"/app/worker-js/graphs/langgraph-dev/dist/index.js:graph"}}
+ENV SERVER_URL=http://host.docker.internal:5050
 
 # 暴露端口
 EXPOSE 3001
@@ -69,4 +72,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 # 启动应用（运行编译后的 JavaScript 文件）
 RUN echo "Final working directory: $(pwd)"
-CMD ["node", "dist/main.mjs"]
+CMD ["node", "dist/main.js"]

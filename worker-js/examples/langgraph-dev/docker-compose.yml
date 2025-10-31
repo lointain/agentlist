@@ -1,43 +1,6 @@
 version: "3.8"
 
 services:
-  # PostgreSQL 数据库（可选，但worker可能需要）
-  postgres:
-    image: postgres:16
-    container_name: langgraph-dev-postgres
-    environment:
-      POSTGRES_DB: agentlist
-      POSTGRES_USER: agentlist
-      POSTGRES_PASSWORD: agentlist123
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - langgraph-dev-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentlist -d agentlist"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Redis（可选，但worker可能需要）
-  redis:
-    image: redis:7-alpine
-    container_name: langgraph-dev-redis
-    ports:
-      - "6380:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - langgraph-dev-network
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # LangGraph Worker
   worker-js:
     build:
@@ -56,11 +19,12 @@ services:
       - ./langgraph.json:/app/worker-js/graphs/langgraph-dev/langgraph.json:ro
       # 可选：挂载代码以支持热重载开发
       # - ./:/app/graphs/langgraph-dev
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    # 移除对 postgres 和 redis 的依赖，因为它们是共享服务
+    # depends_on:
+    #   postgres:
+    #     condition: service_healthy
+    #   redis:
+    #     condition: service_healthy
     networks:
       - langgraph-dev-network
     restart: unless-stopped
@@ -77,9 +41,10 @@ services:
       retries: 3
       start_period: 5s
 
-volumes:
-  postgres_data:
-  redis_data:
+# 移除 postgres_data 和 redis_data 卷定义
+# volumes:
+#   postgres_data:
+#   redis_data:
 
 networks:
   langgraph-dev-network:
