@@ -11,9 +11,8 @@ RUN apk add --no-cache \
 # 设置工作目录
 WORKDIR /app
 
-# 复制worker-js和share目录（本地开发环境）
+# 复制worker-js目录
 COPY ./worker-js ./worker-js
-COPY ./share ./share
 
 # 安装worker-js的Node.js依赖
 WORKDIR /app/worker-js
@@ -23,7 +22,7 @@ RUN npm ci && npm cache clean --force
 RUN mkdir -p /app/graphs/langgraph-dev
 COPY . /app/graphs/langgraph-dev
 
-# 安装langgraph-dev项目的依赖并编译
+# 安装langgraph-dev项目的依赖
 WORKDIR /app/worker-js/graphs/langgraph-dev
 RUN npm install
 
@@ -36,15 +35,8 @@ RUN cat tsconfig.json
 RUN cat package.json | grep -A 10 "scripts"
 # 检查源代码目录结构
 RUN find ./src -type f | sort
-# 注意：tsconfig.json设置了emitDeclarationOnly:true，需要使用其他方式构建
-# 修改tsconfig.json，允许生成JavaScript文件
-RUN sed -i 's/"emitDeclarationOnly": true/"emitDeclarationOnly": false/' tsconfig.json
-# 安装tsx用于开发运行
-RUN npm install -g tsx
-# 使用tsx直接运行源代码（开发模式）
-RUN echo "Using tsx to run source code directly in development mode"
-# 检查是否有其他可能的输出目录
-RUN find /app/worker-js -name "main.mjs" -o -name "main.js" || echo "Main file not found anywhere"
+# 构建 worker-js 项目
+RUN npm run build
 
 # 安装bash（在创建非root用户前）
 RUN apk add --no-cache bash
@@ -75,6 +67,6 @@ EXPOSE 3001
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
-# 启动应用（使用tsx直接运行TypeScript源代码）
+# 启动应用（运行编译后的 JavaScript 文件）
 RUN echo "Final working directory: $(pwd)"
-CMD ["bash", "-c", "echo 'Starting worker with tsx...' && echo 'Current directory:' && pwd && echo 'Source files:' && ls -la ./src && tsx src/main.mts"]
+CMD ["node", "dist/main.mjs"]
