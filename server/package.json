@@ -21,7 +21,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:generate": "drizzle-kit generate",
-    "db:push": "dotenv -c --path ../../.env -- drizzle-kit push --force",
+    "db:push": "drizzle-kit push --force",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
